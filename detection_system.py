@@ -97,11 +97,22 @@ class DetectionSystem:
     def get_current_detections_data(self):
         """Returns the latest raw detection results and frame shape."""
         with self.detections_data_lock:
+            detections = self.latest_detections_data.get("results", [])
+            shape = self.latest_detections_data.get("frame_shape") # Get value, might be None
+
+            frame_width = None
+            frame_height = None
+            # Check if shape is a valid tuple/list before trying to access elements
+            if shape is not None and isinstance(shape, (tuple, list)) and len(shape) >= 2:
+                frame_height = shape[0] # Height is index 0
+                frame_width = shape[1]  # Width is index 1
+            # else: width and height remain None
+
             # Return only the necessary parts for client-side drawing
             return {
-                "detections": self.latest_detections_data.get("results", []), # Default to empty list
-                "frame_width": self.latest_detections_data.get("frame_shape", (None, None))[1], # Width is index 1
-                "frame_height": self.latest_detections_data.get("frame_shape", (None, None))[0] # Height is index 0
+                "detections": detections, # Default to empty list handled by .get() above
+                "frame_width": frame_width,
+                "frame_height": frame_height
             }
     # -----------------------------------------
 
