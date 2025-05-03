@@ -5,35 +5,33 @@ import math
 import threading
 from collections import deque
 import logging # Import logging
-import config # Import config to access DEBUG flag
-# Import shared variables, remove processed_queue import
-from config import (
-    model, frame_queue, stop_event, track_history,
-    tracked_objects_info, max_track_points,
-    latest_detections, detections_lock,
-    latest_annotated_frame, annotated_frame_lock
-)
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
 
 class ObjectDetector:
-    def __init__(self): # No queues needed in constructor anymore
+    def __init__(self, model, frame_queue, annotation_queue, stop_event, results_update_callback, max_track_points, model_names):
         self.model = model
         self.frame_queue = frame_queue
+        self.annotation_queue = annotation_queue
         self.stop_event = stop_event
-        self.thread = None
-        # Keep track history local to the instance if it's only updated here
-        self.track_history = track_history # Or manage instance specific if needed
-        self.tracked_objects_info = tracked_objects_info # Shared info dict
+        self.results_update_callback = results_update_callback
         self.max_track_points = max_track_points
+        self.model_names = model_names
+        self.thread = None
+        # Keep track history and info local to the detection process within the thread loop
+        # They will be passed back via the callback
 
     def start(self):
         self.thread = threading.Thread(target=self._detect_objects, daemon=True)
         self.thread.start()
 
     def _detect_objects(self):
-        logger.info("Detection thread started.") # Use info
+        logger.info("Detection thread started.")
+        # Initialize tracking data here, it will be passed back via callback
+        track_history = {} # {track_id: deque(points)}
+        tracked_objects_info = {} # {track_id: {'name': str, 'last_seen': float, ...}}
+
         try:
             while not self.stop_event.is_set():
                 try:
@@ -46,61 +44,73 @@ class ObjectDetector:
                 current_detections = [] # Store detections for this specific frame
                 frame_shape = frame.shape[:2] # Store height, width of the processed frame
 
-                # --- Draw annotations on a copy of the frame --- 
-                annotated_frame = results[0].plot() # Use the built-in plot function
-                # -----------------------------------------------
-
-                # --- Store the annotated frame --- 
-                with config.annotated_frame_lock:
-                    config.latest_annotated_frame = annotated_frame
-                    logger.debug("ObjectDetector: updated config.latest_annotated_frame")
-                # ---------------------------------
+                # Enqueue raw detection data and frame for annotation
+                try:
+                    self.annotation_queue.put_nowait((
+                        current_detections,
+                        frame_shape,
+                        track_history,
+                        tracked_objects_info,
+                        frame.copy()
+                    ))
+                except queue.Full:
+                    logger.warning("Annotation queue is full; dropping frame annotation task.")
 
                 # Process results
-                for result in results:
-                    if result.boxes is None:
-                        continue
-
-                    boxes = result.boxes.xyxy.cpu().numpy()
-                    confs = result.boxes.conf.cpu().numpy()
-                    cls = result.boxes.cls.cpu().numpy()
+                if results and results[0].boxes is not None:
+                    boxes = results[0].boxes.xyxy.cpu().numpy()
+                    confs = results[0].boxes.conf.cpu().numpy()
+                    cls = results[0].boxes.cls.cpu().numpy()
                     track_ids = None
-                    if hasattr(result.boxes, 'id') and result.boxes.id is not None:
-                        track_ids = result.boxes.id.cpu().numpy()
+                    if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None:
+                        track_ids = results[0].boxes.id.cpu().numpy()
+                        current_frame_track_ids = set() # Keep track of IDs seen in this frame
 
-                    # Extract tracked detections
-                    if track_ids is not None:
+                        # Extract tracked detections
                         for box, conf, cl, track_id in zip(boxes, confs, cls, track_ids):
                             x1, y1, x2, y2 = map(int, box)
                             track_id = int(track_id)
+                            current_frame_track_ids.add(track_id)
                             center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
                             label = f"{self.model.names[int(cl)]} #{track_id} {conf:.2f}"
                             # Generate color based on track_id for consistency
                             color = ((track_id * 50) % 255, (track_id * 80) % 255, (track_id * 120) % 255)
 
-                            # Store detection info instead of drawing immediately
+                            # Store detection info
                             current_detections.append({
                                 'box': (x1, y1, x2, y2),
                                 'label': label,
                                 'color': color,
                                 'track_id': track_id,
-                                'center': center # Keep center if needed for track history
+                                'center': center
                             })
 
-                            # Update track history (using the shared track_history dict)
-                            if track_id not in self.track_history:
-                                self.track_history[track_id] = deque(maxlen=self.max_track_points)
-                            self.track_history[track_id].append(center)
+                            # Update track history
+                            if track_id not in track_history:
+                                track_history[track_id] = deque(maxlen=self.max_track_points)
+                            track_history[track_id].append(center)
 
-                            # Update tracked_objects_info (example)
-                            self.tracked_objects_info[track_id] = {
+                            # Update tracked_objects_info
+                            tracked_objects_info[track_id] = {
                                 'name': self.model.names[int(cl)],
                                 'last_seen': time.time(),
                                 'last_box': (x1, y1, x2, y2)
                             }
 
-                    # Extract non-tracked detections
+                        # --- Clean up old tracks --- 
+                        # Remove tracks that haven't been seen in this frame
+                        # This is a simple approach; more robust methods exist (e.g., time-based expiry)
+                        # Be careful modifying dict while iterating; create a list of keys to remove
+                        # removed_ids = [tid for tid in track_history if tid not in current_frame_track_ids]
+                        # for tid in removed_ids:
+                        #     del track_history[tid]
+                        #     if tid in tracked_objects_info:
+                        #         del tracked_objects_info[tid]
+                        # Consider a time-based cleanup in the DetectionSystem or here if needed
+                        # ---------------------------
+
                     else:
+                        # Extract non-tracked detections
                         for box, conf, cl in zip(boxes, confs, cls):
                             x1, y1, x2, y2 = map(int, box)
                             label = f"{self.model.names[int(cl)]} {conf:.2f}"
@@ -108,34 +118,48 @@ class ObjectDetector:
                             current_detections.append({
                                 'box': (x1, y1, x2, y2),
                                 'label': label,
-                                'color': (0, 255, 0), # Default color for non-tracked
+                                'color': (0, 255, 0), # Default color
                                 'track_id': None,
                                 'center': None
                             })
 
-                # Update shared latest_detections structure
-                with detections_lock:
-                    # Use global scope for assignment within the lock
-                    global latest_detections
-                    latest_detections["results"] = current_detections
-                    latest_detections["frame_shape"] = frame_shape
-                    if config.DEBUG:
-                        logger.debug(f"Detector: Updated latest_detections with {len(current_detections)} results.") # Use debug
+                # Update central state with raw detection data
+                self.results_update_callback(
+                    current_detections,
+                    frame_shape,
+                    track_history,
+                    tracked_objects_info
+                )
+                # logger.debug("ObjectDetector: called results_update_callback") # Optional: can be noisy
 
                 # Mark the task from frame_queue as done
                 self.frame_queue.task_done()
 
         except Exception as e:
-            logger.exception("ObjectDetector: EXCEPTION in thread") # Use exception
+            logger.exception("ObjectDetector: EXCEPTION in thread")
+            self.stop_event.set() # Signal stop on error
         finally:
-            logger.info("Detection thread stopped.") # Use info
+            logger.info("Detection thread stopped.")
 
     def stop(self):
-        # Ensure stop_event is set via app.py or main control logic
-        # self.stop_event.set() # Setting is usually done externally
+        logger.debug("ObjectDetector stop called.")
+        # Stop event should be set by the manager (DetectionSystem)
         if self.thread and self.thread.is_alive():
-            # Attempt to signal queue processing to finish
-            # self.frame_queue.put(None) # Sentinel value if needed, but timeout works
-            self.thread.join(timeout=2) # Allow more time for detection to finish
+            logger.debug(f"Joining ObjectDetector thread (timeout=2s)... Thread ID: {self.thread.ident}")
+            # Ensure the queue processing can finish if blocked on get()
+            # Putting None might be needed if timeout isn't sufficient
+            # try: self.frame_queue.put_nowait(None) # Sentinel value if needed
+            # except queue.Full:
+            #     logger.warning("Could not put sentinel in full frame queue during stop.")
+
+            self.thread.join(timeout=2) # Allow time for detection cycle
             if self.thread.is_alive():
-                logger.warning("Warning: Detection thread did not join cleanly.") # Use warning
+                logger.warning("Warning: Detection thread did not join cleanly.")
+            else:
+                logger.debug("ObjectDetector thread joined successfully.")
+        else:
+            logger.debug("ObjectDetector thread was not running or already joined.")
+        self.thread = None # Clear thread reference
+
+    def is_alive(self):
+        return self.thread is not None and self.thread.is_alive()
