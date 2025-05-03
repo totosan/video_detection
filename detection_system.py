@@ -93,6 +93,18 @@ class DetectionSystem:
         with self.detections_data_lock:
             return self.latest_detections_data["track_history"].copy()
 
+    # --- New Getter for Current Detections ---
+    def get_current_detections_data(self):
+        """Returns the latest raw detection results and frame shape."""
+        with self.detections_data_lock:
+            # Return only the necessary parts for client-side drawing
+            return {
+                "detections": self.latest_detections_data.get("results", []), # Default to empty list
+                "frame_width": self.latest_detections_data.get("frame_shape", (None, None))[1], # Width is index 1
+                "frame_height": self.latest_detections_data.get("frame_shape", (None, None))[0] # Height is index 0
+            }
+    # -----------------------------------------
+
     # --- Lifecycle Management ---
 
     def start(self):

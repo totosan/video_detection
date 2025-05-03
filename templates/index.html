@@ -16,18 +16,33 @@
         #tracked-objects li.recent { background-color: #e6ffe6; font-weight: bold; } /* Style for recently seen */
         #tracked-objects li.stale { background-color: #f0f0f0; color: #666; } /* Style for older items */
         .timestamp { font-size: 0.8em; color: #555; margin-left: 10px; }
+        .video-container {
+            position: relative; /* Needed for absolute positioning of canvas */
+            display: inline-block; /* Shrink wrap the container */
+            line-height: 0; /* Prevent extra space below image */
+        }
+        #detectionCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none; /* Allow clicks to pass through to the video/image */
+        }
     </style>
 </head>
 <body>
     <h1>Live Object Detection Feed</h1>
+
     <div class="stream-container">
-        <h2>Raw Camera Feed</h2>
-        <img src="{{ url_for('video_feed') }}" width="640" height="360">
+        <h2>Raw Camera Feed with Client-Side Detections</h2>
+        <div class="video-container"> <!-- Add container div -->
+            <img id="videoFeed" src="{{ url_for('video_feed') }}" width="640" height="360" alt="Raw Video Feed">
+            <canvas id="detectionCanvas"></canvas> <!-- Add canvas overlay -->
+        </div>
     </div>
 
     <div class="stream-container">
-        <h2>Annotated Feed (Detections)</h2>
-        <img src="{{ url_for('video_feed_annotated') }}" width="640" height="360">
+        <h2>Annotated Feed (Backend Detections)</h2>
+        <img src="{{ url_for('video_feed_annotated') }}" width="640" height="360" alt="Annotated Video Feed">
     </div>
 
     <div id="tracked-objects">
@@ -86,6 +101,125 @@
 
         // Initial load
         updateTrackedObjects();
+
+        // --- Client-Side Detection Drawing ---
+        const videoFeed = document.getElementById('videoFeed');
+        const canvas = document.getElementById('detectionCanvas');
+        const ctx = canvas.getContext('2d');
+        let originalFrameWidth = null;
+        let originalFrameHeight = null;
+
+        function resizeCanvas() {
+            // Match canvas size to the displayed image size
+            canvas.width = videoFeed.clientWidth;
+            canvas.height = videoFeed.clientHeight;
+            // console.log(`Canvas resized to: ${canvas.width}x${canvas.height}`);
+        }
+
+        async function fetchAndDrawDetections() {
+            if (!videoFeed.complete || videoFeed.naturalWidth === 0) {
+                // Wait for image to load initially or if the src changes
+                // console.log("Video feed image not ready yet.");
+                requestAnimationFrame(fetchAndDrawDetections); // Try again next frame
+                return;
+            }
+
+            // Ensure canvas is the correct size (might change if layout shifts)
+            if (canvas.width !== videoFeed.clientWidth || canvas.height !== videoFeed.clientHeight) {
+                resizeCanvas();
+            }
+
+            try {
+                const response = await fetch('/api/current_detections');
+                if (!response.ok) {
+                    console.error('Failed to fetch detections:', response.statusText);
+                    // Optionally clear canvas if fetch fails repeatedly
+                    // ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    return;
+                }
+                const data = await response.json();
+
+                // Store original dimensions if we get them and they are valid
+                if (data.frame_width && data.frame_height) {
+                    originalFrameWidth = data.frame_width;
+                    originalFrameHeight = data.frame_height;
+                }
+
+                // Clear previous drawings
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                if (!originalFrameWidth || !originalFrameHeight || !data.detections || data.detections.length === 0) {
+                    // console.log("No detections or original frame size missing.");
+                    return; // Nothing to draw or cannot scale
+                }
+
+                // Calculate scaling factors based on the *displayed* size vs original size
+                const scaleX = canvas.width / originalFrameWidth;
+                const scaleY = canvas.height / originalFrameHeight;
+
+                // Draw current detections
+                data.detections.forEach(det => {
+                    if (!det.box || det.box.length !== 4) return; // Skip invalid boxes
+
+                    const [x1, y1, x2, y2] = det.box;
+                    const label = det.label || 'unknown'; // Default label
+                    const color = det.color ? `rgb(${det.color[0]}, ${det.color[1]}, ${det.color[2]})` : 'red'; // Default color
+
+                    // Scale coordinates
+                    const canvasX1 = x1 * scaleX;
+                    const canvasY1 = y1 * scaleY;
+                    const canvasW = (x2 - x1) * scaleX;
+                    const canvasH = (y2 - y1) * scaleY;
+
+                    // Draw bounding box
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(canvasX1, canvasY1, canvasW, canvasH);
+
+                    // Draw label background
+                    ctx.fillStyle = color;
+                    const text = `${label}`; // Add confidence later if available
+                    ctx.font = '12px Arial'; // Set font before measuring text
+                    const textMetrics = ctx.measureText(text);
+                    const textHeight = 12; // Approximate height based on font size
+                    ctx.fillRect(canvasX1, canvasY1 - textHeight - 4, textMetrics.width + 4, textHeight + 4);
+
+                    // Draw label text
+                    ctx.fillStyle = 'white';
+                    ctx.fillText(text, canvasX1 + 2, canvasY1 - 4);
+                });
+
+            } catch (error) {
+                console.error('Error fetching or drawing detections:', error);
+                // Optionally clear canvas on error
+                // ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+        }
+
+        // --- Initialization ---
+
+        // Ensure canvas is sized correctly initially and on resize/load
+        videoFeed.onload = () => {
+            console.log("Video feed image loaded or reloaded.");
+            resizeCanvas();
+            // It's generally better to have a single loop running
+        };
+        window.addEventListener('resize', resizeCanvas);
+
+        // Handle cases where the image might already be cached/loaded before onload attaches
+        if (videoFeed.complete && videoFeed.naturalWidth !== 0) {
+             console.log("Video feed image already complete.");
+             resizeCanvas();
+        }
+
+        // Start the drawing loop
+        setInterval(fetchAndDrawDetections, 100); // Fetch and draw every 100ms
+
+        // Initial call to size canvas (in case image loads before JS runs fully)
+        // resizeCanvas(); // resizeCanvas is called on load or if already complete
+
+        // --- End Client-Side Detection Drawing ---
+
     </script>
 </body>
 </html>

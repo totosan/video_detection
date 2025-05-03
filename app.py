@@ -112,6 +112,21 @@ def api_tracked_objects():
         logger.exception("API: Error converting tracked_objects list to JSON") # Use exception
         return jsonify({"error": "Failed to serialize tracked objects data"}), 500
 
+# --- New API Endpoint for Current Detections ---
+@app.route('/api/current_detections')
+def api_current_detections():
+    """API endpoint to get the latest raw detection results for client-side drawing."""
+    try:
+        data = detection_system.get_current_detections_data()
+        # Ensure detections is always a list, even if None initially
+        if data.get('detections') is None:
+            data['detections'] = []
+        return jsonify(data)
+    except Exception as e:
+        logger.exception("API: Error getting or serializing current detections data")
+        return jsonify({"error": "Failed to get current detections data"}), 500
+# ---------------------------------------------
+
 @app.route('/snapshot')
 def snapshot():
     """Returns a single JPEG snapshot from the latest captured frame."""
