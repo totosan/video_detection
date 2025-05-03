@@ -1,0 +1,8 @@
+<!doctype html>
+<title>YOLO Inference Result</title>
+<h1>Inference Result</h1>
+<img src="{{ url_for('static_files', filename=filename) }}" alt="Detection Result">
+<p>Inference Time: {{ inference_time }} seconds</p>
+<p>Total Request Time: {{ total_time }} seconds</p>
+<br><br>
+<a href="/">Upload another image</a>

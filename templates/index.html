@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLO Object Detection Stream</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        h1 { text-align: center; }
+        .stream-container { text-align: center; margin-bottom: 20px; }
+        img { max-width: 100%; height: auto; border: 1px solid #ccc; }
+        #tracked-objects { margin-top: 20px; border: 1px solid #eee; padding: 10px; }
+        #tracked-objects h2 { margin-top: 0; }
+        #tracked-objects ul { list-style: none; padding: 0; }
+        #tracked-objects li { margin-bottom: 5px; padding: 5px; border-radius: 3px; }
+        #tracked-objects li.recent { background-color: #e6ffe6; font-weight: bold; } /* Style for recently seen */
+        #tracked-objects li.stale { background-color: #f0f0f0; color: #666; } /* Style for older items */
+        .timestamp { font-size: 0.8em; color: #555; margin-left: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Live Object Detection Feed</h1>
+    <div class="stream-container">
+        <h2>Raw Camera Feed</h2>
+        <img src="{{ url_for('video_feed') }}" width="640" height="360">
+    </div>
+
+    <div class="stream-container">
+        <h2>Annotated Feed (Detections)</h2>
+        <img src="{{ url_for('video_feed_annotated') }}" width="640" height="360">
+    </div>
+
+    <div id="tracked-objects">
+        <h2>Recently Tracked Objects</h2>
+        <ul id="tracked-objects-list">
+            <li>Loading...</li>
+        </ul>
+    </div>
+
+    <script>
+        function updateTrackedObjects() {
+            fetch('/api/tracked_objects')
+                .then(response => response.json())
+                .then(data => {
+                    const list = document.getElementById('tracked-objects-list');
+                    list.innerHTML = ''; // Clear current list
+
+                    if (data.length === 0) {
+                        list.innerHTML = '<li>No objects tracked recently.</li>';
+                        return;
+                    }
+
+                    data.forEach(obj => {
+                        const listItem = document.createElement('li');
+                        // Add class based on how recently the object was seen
+                        if (obj.time_since_seen < 3.0) { // Emphasize if seen < 3 seconds ago
+                            listItem.classList.add('recent');
+                        } else {
+                             listItem.classList.add('stale');
+                        }
+
+                        // Format the last seen time
+                        const lastSeenDate = new Date(obj.last_seen_timestamp * 1000); // Convert seconds to milliseconds
+                        const timeString = lastSeenDate.toLocaleTimeString();
+                        const dateString = lastSeenDate.toLocaleDateString();
+
+
+                        listItem.textContent = `ID: ${obj.id} - ${obj.name}`;
+                        const timeSpan = document.createElement('span');
+                        timeSpan.classList.add('timestamp');
+                        timeSpan.textContent = `(Seen ${obj.time_since_seen}s ago at ${timeString})`;
+                        listItem.appendChild(timeSpan);
+
+                        list.appendChild(listItem);
+                    });
+                })
+                .catch(error => {
+                    console.error('Error fetching tracked objects:', error);
+                    const list = document.getElementById('tracked-objects-list');
+                    list.innerHTML = '<li>Error loading data.</li>';
+                });
+        }
+
+        // Update the list every 2 seconds
+        setInterval(updateTrackedObjects, 2000);
+
+        // Initial load
+        updateTrackedObjects();
+    </script>
+</body>
+</html>
