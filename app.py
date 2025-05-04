@@ -127,6 +127,28 @@ def api_current_detections():
         return jsonify({"error": "Failed to get current detections data"}), 500
 # ---------------------------------------------
 
+# --- API Endpoints for Backend Annotation Control ---
+@app.route('/api/backend_annotation/toggle', methods=['POST'])
+def toggle_backend_annotation():
+    """Toggles the backend annotation generation on/off."""
+    try:
+        new_status = detection_system.toggle_backend_annotation()
+        return jsonify({"backend_annotation_enabled": new_status})
+    except Exception as e:
+        logger.exception("API: Error toggling backend annotation")
+        return jsonify({"error": "Failed to toggle backend annotation"}), 500
+
+@app.route('/api/backend_annotation/status', methods=['GET'])
+def get_backend_annotation_status():
+    """Gets the current status of backend annotation generation."""
+    try:
+        status = detection_system.is_backend_annotation_enabled()
+        return jsonify({"backend_annotation_enabled": status})
+    except Exception as e:
+        logger.exception("API: Error getting backend annotation status")
+        return jsonify({"error": "Failed to get backend annotation status"}), 500
+# --------------------------------------------------
+
 @app.route('/snapshot')
 def snapshot():
     """Returns a single JPEG snapshot from the latest captured frame."""

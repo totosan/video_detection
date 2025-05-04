@@ -38,11 +38,13 @@ class DetectionSystem:
         self.latest_frame = None
         self.latest_annotated_frame = None
         self.latest_detections_data = {"results": None, "frame_shape": None, "track_history": {}, "tracked_objects_info": {}}
+        self.backend_annotation_enabled = False # Flag for backend annotation
 
         # --- Synchronization Primitives ---
         self.frame_lock = threading.Lock()
         self.annotated_frame_lock = threading.Lock()
         self.detections_data_lock = threading.Lock()
+        self.backend_annotation_lock = threading.Lock() # Lock for the flag
         self.stop_event = threading.Event()
 
         # --- Queues ---
@@ -123,6 +125,29 @@ class DetectionSystem:
             }
     # -----------------------------------------
 
+    # --- Backend Annotation Control ---
+    def enable_backend_annotation(self):
+        with self.backend_annotation_lock:
+            self.backend_annotation_enabled = True
+            logger.info("Backend annotation ENABLED.")
+
+    def disable_backend_annotation(self):
+        with self.backend_annotation_lock:
+            self.backend_annotation_enabled = False
+            logger.info("Backend annotation DISABLED.")
+
+    def toggle_backend_annotation(self):
+        with self.backend_annotation_lock:
+            self.backend_annotation_enabled = not self.backend_annotation_enabled
+            status = "ENABLED" if self.backend_annotation_enabled else "DISABLED"
+            logger.info(f"Backend annotation toggled: {status}.")
+            return self.backend_annotation_enabled
+
+    def is_backend_annotation_enabled(self):
+        with self.backend_annotation_lock:
+            return self.backend_annotation_enabled
+    # ----------------------------------
+
     # --- Lifecycle Management ---
 
     def start(self):
@@ -167,7 +192,8 @@ class DetectionSystem:
             stop_event=self.stop_event,
             annotated_frame_callback=self.update_latest_annotated_frame,
             max_track_points=self.max_track_points,
-            model_names=self.model.names
+            model_names=self.model.names,
+            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled # Pass the getter method
         )
 
         # Start threads

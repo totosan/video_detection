@@ -27,10 +27,17 @@
             left: 0;
             pointer-events: none; /* Allow clicks to pass through to the video/image */
         }
+        .controls { text-align: center; margin-bottom: 20px; }
+        button { padding: 8px 15px; font-size: 1em; cursor: pointer; }
     </style>
 </head>
 <body>
     <h1>Live Object Detection Feed</h1>
+
+    <div class="controls">
+        <button id="toggleBackendAnnotationBtn">Toggle Backend Annotation</button>
+        <span id="backendAnnotationStatus">Status: Unknown</span>
+    </div>
 
     <div class="stream-container">
         <h2>Raw Camera Feed with Client-Side Detections</h2>
@@ -101,6 +108,57 @@
 
         // Initial load
         updateTrackedObjects();
+
+        // --- Backend Annotation Toggle ---
+        const toggleBtn = document.getElementById('toggleBackendAnnotationBtn');
+        const statusSpan = document.getElementById('backendAnnotationStatus');
+
+        async function fetchBackendAnnotationStatus() {
+            try {
+                const response = await fetch('/api/backend_annotation/status');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                updateButtonStatus(data.backend_annotation_enabled);
+            } catch (error) {
+                console.error('Error fetching backend annotation status:', error);
+                statusSpan.textContent = 'Status: Error';
+            }
+        }
+
+        function updateButtonStatus(isEnabled) {
+            if (isEnabled) {
+                statusSpan.textContent = 'Status: Enabled';
+                // Optional: Change button text or style
+                // toggleBtn.textContent = 'Disable Backend Annotation';
+            } else {
+                statusSpan.textContent = 'Status: Disabled';
+                // Optional: Change button text or style
+                // toggleBtn.textContent = 'Enable Backend Annotation';
+            }
+        }
+
+        toggleBtn.addEventListener('click', async () => {
+            try {
+                statusSpan.textContent = 'Status: Toggling...'; // Provide feedback
+                const response = await fetch('/api/backend_annotation/toggle', { method: 'POST' });
+                 if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                updateButtonStatus(data.backend_annotation_enabled);
+            } catch (error) {
+                console.error('Error toggling backend annotation:', error);
+                statusSpan.textContent = 'Status: Error';
+                // Fetch status again to be sure
+                fetchBackendAnnotationStatus();
+            }
+        });
+
+        // Fetch initial status on page load
+        fetchBackendAnnotationStatus();
+        // --- End Backend Annotation Toggle ---
 
         // --- Client-Side Detection Drawing ---
         const videoFeed = document.getElementById('videoFeed');
