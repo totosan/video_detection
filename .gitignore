@@ -4,3 +4,4 @@ try_reduce_cuda*
 core
 *.pt
 *.engine
+*.onnx
