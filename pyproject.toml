@@ -1,0 +1,14 @@
+[project]
+name = "video-detection"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "dotenv>=0.9.9",
+    "flask>=3.1.0",
+    "lap>=0.5.12",
+    "mcp[cli]>=1.7.1",
+    "mcpo>=0.0.13",
+    "ultralytics>=8.3.127",
+]

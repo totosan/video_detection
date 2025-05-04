@@ -1,7 +1,6 @@
-\
-import mcp
 import logging
 import threading
+from mcp.server.fastmcp import FastMCP
 from detection_system import DetectionSystem
 
 # Configure logging
@@ -13,6 +12,9 @@ logger = logging.getLogger(__name__)
 detection_system_instance = None
 detection_system_lock = threading.Lock()
 start_stop_lock = threading.Lock() # Lock specifically for start/stop operations
+
+# --- MCP Server Setup ---
+mcp = FastMCP("VideoDetectionServer")
 
 def get_detection_system():
     """Gets or creates the singleton DetectionSystem instance."""
@@ -29,15 +31,10 @@ def get_detection_system():
                 raise RuntimeError("Could not initialize the core Detection System") from e
         return detection_system_instance
 
-# --- MCP Server Setup ---
-mcp_server = mcp.MCP(
-    name="VideoDetectionServer",
-    description="MCP Server to control and query the YOLO video detection system."
-)
 
 # --- MCP Tools ---
 
-@mcp_server.tool()
+@mcp.tool()
 def start_detection_system() -> str:
     """
     Starts the video detection and tracking system.
@@ -66,7 +63,7 @@ def start_detection_system() -> str:
             logger.exception("MCP Tool: Exception during detection system start.")
             return f"Error starting detection system: {e}"
 
-@mcp_server.tool()
+@mcp.tool()
 def stop_detection_system() -> str:
     """
     Stops the video detection and tracking system.
@@ -95,7 +92,7 @@ def stop_detection_system() -> str:
             logger.exception("MCP Tool: Exception during detection system stop.")
             return f"Error stopping detection system: {e}"
 
-@mcp_server.tool()
+@mcp.tool()
 def get_system_status() -> dict:
     """
     Checks if the detection system's worker threads are currently running.
@@ -113,7 +110,7 @@ def get_system_status() -> dict:
         return {"is_running": False, "error": str(e)}
 
 
-@mcp_server.tool()
+@mcp.tool()
 def get_current_detections() -> dict:
     """
     Retrieves the latest detection results (bounding boxes, class IDs, confidence)
@@ -135,7 +132,7 @@ def get_current_detections() -> dict:
         logger.exception("MCP Tool: Exception retrieving current detections.")
         return {"error": f"Error retrieving detections: {e}"}
 
-@mcp_server.tool()
+@mcp.tool()
 def get_tracked_objects() -> dict:
     """
     Retrieves information about currently tracked objects (ID, class, last seen position).
@@ -155,7 +152,7 @@ def get_tracked_objects() -> dict:
         logger.exception("MCP Tool: Exception retrieving tracked objects.")
         return {"error": f"Error retrieving tracked objects: {e}"}
 
-@mcp_server.tool()
+@mcp.tool()
 def get_object_track_history() -> dict:
     """
     Retrieves the recent position history for tracked objects.
@@ -175,6 +172,10 @@ def get_object_track_history() -> dict:
         logger.exception("MCP Tool: Exception retrieving track history.")
         return {"error": f"Error retrieving track history: {e}"}
 
+@mcp.resource("greeting://{name}")
+def get_greeting(name: str) -> str:
+    """Get a personalized greeting"""
+    return f"Hello, {name}!"
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -184,7 +185,7 @@ if __name__ == "__main__":
         get_detection_system()
         logger.info("Running MCP server...")
         # Run the server using stdio communication as per the blog post example
-        mcp_server.run()
+        mcp.run(transport='stdio') # Use the instance variable name
     except RuntimeError as e:
          logger.critical(f"Failed to start MCP Server due to DetectionSystem initialization failure: {e}")
     except Exception as e:
