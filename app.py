@@ -191,7 +191,7 @@ if __name__ == '__main__':
         log.setLevel(logging.WARNING)
 
         # Run Flask app (threaded=True is important for handling multiple requests)
-        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True, use_reloader=False)
+        app.run(host='0.0.0.0', port=3000, debug=False, threaded=True, use_reloader=False)
 
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received. Exiting.") # Use info

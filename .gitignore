@@ -5,3 +5,4 @@ core
 *.pt
 *.engine
 *.onnx
+.env

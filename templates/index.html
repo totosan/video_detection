@@ -189,6 +189,37 @@
                     ctx.fillText(text, canvasX1 + 2, canvasY1 - 4);
                 });
 
+                // --- Draw Track History ---
+                const trackHistory = data.track_history;
+                if (trackHistory) {
+                    Object.keys(trackHistory).forEach(trackId => {
+                        const points = trackHistory[trackId];
+                        if (points && points.length > 1) {
+                            // Find the color associated with this track ID from current detections
+                            // This assumes the track ID is present in the current detections
+                            // If not, we might need a fallback color generation
+                            const currentDet = data.detections.find(d => d.track_id == trackId);
+                            const trackColor = currentDet && currentDet.color ? `rgb(${currentDet.color[0]}, ${currentDet.color[1]}, ${currentDet.color[2]})` : `hsl(${trackId * 40 % 360}, 100%, 50%)`; // Fallback color based on ID
+
+                            ctx.strokeStyle = trackColor;
+                            ctx.lineWidth = 2;
+                            ctx.beginPath();
+
+                            // Scale and move to the first point
+                            const firstPoint = points[0];
+                            ctx.moveTo(firstPoint[0] * scaleX, firstPoint[1] * scaleY);
+
+                            // Draw lines to subsequent points
+                            for (let i = 1; i < points.length; i++) {
+                                const point = points[i];
+                                ctx.lineTo(point[0] * scaleX, point[1] * scaleY);
+                            }
+                            ctx.stroke(); // Render the path
+                        }
+                    });
+                }
+                // --- End Draw Track History ---
+
             } catch (error) {
                 console.error('Error fetching or drawing detections:', error);
                 // Optionally clear canvas on error

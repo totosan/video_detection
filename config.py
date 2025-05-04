@@ -1,4 +1,5 @@
 import os
+from dotenv import load_dotenv
 import logging # Import logging
 from collections import deque # Keep deque if used elsewhere, otherwise remove
 
@@ -10,8 +11,14 @@ TEMPLATE_FOLDER = 'templates'
 os.makedirs(STATIC_FOLDER, exist_ok=True)
 
 # Model and Stream Configuration (Moved from runtime)
-YOLO_MODEL_PATH = "yolo12n.engine" # Or yolo12n.pt if not using TensorRT
-RTSP_STREAM_URL = "rtsp://admin:QxT638_!1@192.168.0.55:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif"
+YOLO_MODEL_PATH = "yolo12n.pt" # Or yolo12n.pt if not using TensorRT
+# Load environment variables from .env file
+load_dotenv()
+
+# Get VIDEO_URL from environment variables
+VIDEO_URL = os.getenv("VIDEO_URL", "")
+
+RTSP_STREAM_URL = VIDEO_URL
 
 # Tracking data defaults (if needed as constants)
 MAX_TRACK_POINTS = 30
@@ -25,16 +32,3 @@ logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 logger = logging.getLogger(__name__) # Get logger for config module
 
 logger.info("Static configuration loaded.")
-
-# --- Removed Runtime State ---
-# model instance (loaded in DetectionSystem)
-# track_history (managed by DetectionSystem/ObjectDetector)
-# tracked_objects_info (managed by DetectionSystem/ObjectDetector)
-# frame_queue (managed by DetectionSystem)
-# latest_frame (managed by DetectionSystem)
-# frame_lock (managed by DetectionSystem)
-# latest_detections (managed by DetectionSystem)
-# detections_lock (managed by DetectionSystem)
-# latest_annotated_frame (managed by DetectionSystem)
-# annotated_frame_lock (managed by DetectionSystem)
-# stop_event (managed by DetectionSystem)

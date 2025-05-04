@@ -40,7 +40,7 @@ class ObjectDetector:
                     continue
 
                 # Perform detection
-                results = self.model.track(frame, persist=True, verbose=False)
+                results = self.model.track(frame, persist=True, verbose=False, device='mps')
                 current_detections = [] # Store detections for this specific frame
                 frame_shape = frame.shape[:2] # Store height, width of the processed frame
 

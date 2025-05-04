@@ -27,7 +27,8 @@ class DetectionSystem:
 
         # --- Model Loading ---
         try:
-            self.model = YOLO(self.yolo_model_path)
+            self.model = YOLO(self.yolo_model_path)  # Load the YOLO model
+            self.model.devices = 'mps'  # Set device to MPS (Metal Performance Shaders) for macOS
             logger.info(f"Loaded YOLO model from {self.yolo_model_path}")
         except Exception as e:
             logger.exception("Failed to load YOLO model. Cannot initialize DetectionSystem.")
@@ -95,24 +96,30 @@ class DetectionSystem:
 
     # --- New Getter for Current Detections ---
     def get_current_detections_data(self):
-        """Returns the latest raw detection results and frame shape."""
+        """Returns the latest raw detection results, frame shape, and track history."""
         with self.detections_data_lock:
             detections = self.latest_detections_data.get("results", [])
-            shape = self.latest_detections_data.get("frame_shape") # Get value, might be None
+            shape = self.latest_detections_data.get("frame_shape")
+            track_history_deques = self.latest_detections_data.get("track_history", {}) # Get track history (deques)
 
             frame_width = None
             frame_height = None
-            # Check if shape is a valid tuple/list before trying to access elements
             if shape is not None and isinstance(shape, (tuple, list)) and len(shape) >= 2:
-                frame_height = shape[0] # Height is index 0
-                frame_width = shape[1]  # Width is index 1
-            # else: width and height remain None
+                frame_height = shape[0]
+                frame_width = shape[1]
 
-            # Return only the necessary parts for client-side drawing
+            # Convert deques to lists for JSON serialization
+            track_history_lists = {
+                track_id: list(points)
+                for track_id, points in track_history_deques.items()
+            }
+
+            # Return the necessary parts for client-side drawing
             return {
-                "detections": detections, # Default to empty list handled by .get() above
+                "detections": detections,
                 "frame_width": frame_width,
-                "frame_height": frame_height
+                "frame_height": frame_height,
+                "track_history": track_history_lists # Return lists instead of deques
             }
     # -----------------------------------------
 
