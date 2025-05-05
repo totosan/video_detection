@@ -121,6 +121,14 @@
                 }
                 const data = await response.json();
                 updateButtonStatus(data.backend_annotation_enabled);
+
+                // Enable or disable the annotated view based on the status
+                //const annotatedFeed = document.querySelector('.stream-container');
+                //if (data.backend_annotation_enabled) {
+                //    annotatedFeed.style.display = 'block'; // Show annotated feed
+                //} else {
+                //    annotatedFeed.style.display = 'none'; // Hide annotated feed
+                //}
             } catch (error) {
                 console.error('Error fetching backend annotation status:', error);
                 statusSpan.textContent = 'Status: Error';

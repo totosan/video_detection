@@ -8,6 +8,7 @@ import numpy as np # Keep numpy if needed elsewhere
 from flask import Flask, render_template, Response, jsonify, request
 import logging # Import logging
 import atexit # To ensure cleanup on exit
+import collections # Import collections for deque type checking
 
 # Import static config and the new system manager
 from config import STATIC_FOLDER, TEMPLATE_FOLDER, RTSP_STREAM_URL # Only import static config
@@ -148,6 +149,58 @@ def get_backend_annotation_status():
         logger.exception("API: Error getting backend annotation status")
         return jsonify({"error": "Failed to get backend annotation status"}), 500
 # --------------------------------------------------
+
+# --- API Endpoint for System Status ---
+@app.route('/api/status')
+def api_status():
+    """API endpoint to get the running status of the detection system."""
+    try:
+        status = detection_system.is_running()
+        return jsonify({"running": status})
+    except Exception as e:
+        logger.exception("API: Error getting detection system status")
+        return jsonify({"error": "Failed to get system status"}), 500
+# ------------------------------------
+
+# --- API Endpoint for Track History ---
+@app.route('/api/track_history')
+def api_track_history():
+    """API endpoint to get the history of tracked objects."""
+    try:
+        history = detection_system.get_track_history()
+        # Convert history keys (track_id) to strings if they are not already,
+        # as JSON keys must be strings.
+        # Also, convert internal data structures if necessary for JSON serialization.
+        serializable_history = {}
+        for track_id, data in history.items():
+             # Check if data is actually a dictionary before processing
+             if isinstance(data, dict):
+                 serializable_data = {}
+                 for key, value in data.items():
+                     if isinstance(value, collections.deque):
+                         # Convert deque to list for JSON
+                         serializable_data[key] = list(value)
+                     # Add check for numpy arrays if they might be present
+                     elif isinstance(value, np.ndarray):
+                         serializable_data[key] = value.tolist() # Convert numpy array to list
+                     # Add check for numpy numeric types
+                     elif isinstance(value, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64,
+                                             np.uint8, np.uint16, np.uint32, np.uint64,
+                                             np.float_, np.float16, np.float32, np.float64)):
+                         serializable_data[key] = float(value) if isinstance(value, (np.float_, np.float16, np.float32, np.float64)) else int(value)
+                     else:
+                         # Assume other types are directly serializable
+                         serializable_data[key] = value
+                 serializable_history[str(track_id)] = serializable_data
+             else:
+                 logger.warning(f"API: Skipping track_id {track_id} in history serialization because its data is not a dictionary (type: {type(data)}).")
+                 # Optionally add placeholder: serializable_history[str(track_id)] = {"error": "Invalid data format"}
+
+        return jsonify(serializable_history)
+    except Exception as e:
+        logger.exception("API: Error getting or serializing track history")
+        return jsonify({"error": "Failed to get track history"}), 500
+# ------------------------------------
 
 @app.route('/snapshot')
 def snapshot():

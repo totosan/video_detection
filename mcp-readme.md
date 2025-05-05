@@ -63,6 +63,7 @@ You can run the MCP server directly using `mcp` commands for quick testing. This
     *   `[mcpo options]`: Flags to configure `mcpo`, like `--host`, `--port`, `--api-key`.
     *   `--`: **Crucial separator**. Tells `mcpo` that the following arguments are the command to start your actual MCP server.
     *   `[your mcp server command]`: The command to run your MCP server, typically using `uv run mcp run ...`.
+    *   Example: `uv run --with mcp mcp run mcp_server.py`: The command `mcp` will execute internally to start your MCP server via stdio.
 
 -   **Example Call:**
     Run `mcpo` on port 8081, proxying the `mcp_server.py` script.
@@ -73,8 +74,7 @@ You can run the MCP server directly using `mcp` commands for quick testing. This
     *   `--host localhost`: Makes the server accessible only locally. Use `0.0.0.0` to allow external access (use with caution).
     *   `--port 8081`: The port where `mcpo` will listen for HTTP requests.
     *   `--`: Separator.
-    *   `uv run --with mcp mcp run mcp_server.py`: The command `mcpo` will execute internally to start your MCP server via stdio.
-
+    *   Example: `uvx mcpo --host localhost --port 8081 -- uv run --with mcp mcp run mcp_server.py`
 -   **Accessing the Server:**
     *   **API Endpoint:** Your MCP tools are now available via HTTP POST requests to `http://localhost:8081/invoke/{tool_name}`.
     *   **OpenAPI Docs:** `mcpo` automatically generates interactive documentation. Access it at `http://localhost:8081/docs`.
