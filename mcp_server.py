@@ -2,6 +2,7 @@ import logging
 import threading
 import requests # Import requests library
 import json # Import json for parsing
+import base64 # Import base64 for encoding
 from mcp.server.fastmcp import FastMCP
 # Remove direct import of DetectionSystem
 # from detection_system import DetectionSystem
@@ -187,58 +188,64 @@ def get_backend_annotation_status() -> dict:
 @mcp.tool()
 def get_snapshot() -> dict:
     """
-    Requests a snapshot of the latest processed frame from the Flask API.
+    Requests a snapshot of the latest processed frame from the Flask API and returns it as a base64 encoded string.
 
     Returns:
-        dict: A dictionary indicating success or failure, and the URL to fetch the snapshot.
-              Example success: {"status": "success", "url": "http://localhost:3000/snapshot"}
-              Example error: {"status": "error", "message": "API request failed...", "url": "http://localhost:3000/snapshot"}
+        dict: A dictionary indicating success or failure, and the base64 encoded image data.
+              Example success: {"status": "success", "image_base64": "iVBORw0KGgoAAAANSUhEUg..."}
+              Example error: {"status": "error", "message": "API request failed..."}
     """
     logger.info("MCP Tool: get_snapshot called.")
-    # Correct URL construction (assuming Flask runs at root)
     flask_app_base_url = FLASK_API_BASE_URL.replace("/api", "") # Derive base URL
     url = f"{flask_app_base_url}/snapshot"
     try:
-        # Use requests directly as this endpoint returns an image, not JSON
-        response = requests.get(url, timeout=5, stream=True) # stream=True might be useful if checking headers first
+        # Use requests directly as this endpoint returns an image
+        response = requests.get(url, timeout=5) # No need for stream=True if reading content directly
         response.raise_for_status() # Check for HTTP errors
-        # Don't try to parse JSON, just confirm success
-        logger.info(f"MCP Tool: Snapshot request to {url} successful.")
-        return {"status": "success", "url": url}
+
+        # Read image content and encode to base64
+        image_bytes = response.content
+        base64_encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+
+        logger.info(f"MCP Tool: Snapshot request to {url} successful, returning base64 image.")
+        return {"status": "success", "image_base64": base64_encoded_image}
     except requests.exceptions.RequestException as e:
         logger.error(f"MCP Tool: API request failed for get_snapshot at {url}: {e}")
-        return {"status": "error", "message": f"API request failed: {e}", "url": url}
+        return {"status": "error", "message": f"API request failed: {e}"}
     except Exception as e:
         logger.exception(f"MCP Tool: Unexpected error during get_snapshot request to {url}")
-        return {"status": "error", "message": f"Unexpected error: {e}", "url": url}
+        return {"status": "error", "message": f"Unexpected error: {e}"}
 
 @mcp.tool()
 def get_raw_snapshot() -> dict:
     """
-    Requests a raw snapshot directly from the RTSP stream via the Flask API.
+    Requests a raw snapshot directly from the RTSP stream via the Flask API and returns it as a base64 encoded string.
 
     Returns:
-        dict: A dictionary indicating success or failure, and the URL to fetch the raw snapshot.
-              Example success: {"status": "success", "url": "http://localhost:3000/raw_snapshot"}
-              Example error: {"status": "error", "message": "API request failed...", "url": "http://localhost:3000/raw_snapshot"}
+        dict: A dictionary indicating success or failure, and the base64 encoded image data.
+              Example success: {"status": "success", "image_base64": "iVBORw0KGgoAAAANSUhEUg..."}
+              Example error: {"status": "error", "message": "API request failed..."}
     """
     logger.info("MCP Tool: get_raw_snapshot called.")
-    # Correct URL construction (assuming Flask runs at root)
     flask_app_base_url = FLASK_API_BASE_URL.replace("/api", "") # Derive base URL
     url = f"{flask_app_base_url}/raw_snapshot"
     try:
-        # Use requests directly as this endpoint returns an image, not JSON
-        response = requests.get(url, timeout=10, stream=True) # Longer timeout for direct capture
+        # Use requests directly as this endpoint returns an image
+        response = requests.get(url, timeout=10) # Longer timeout for direct capture
         response.raise_for_status() # Check for HTTP errors
-        # Don't try to parse JSON, just confirm success
-        logger.info(f"MCP Tool: Raw snapshot request to {url} successful.")
-        return {"status": "success", "url": url}
+
+        # Read image content and encode to base64
+        image_bytes = response.content
+        base64_encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+
+        logger.info(f"MCP Tool: Raw snapshot request to {url} successful, returning base64 image.")
+        return {"status": "success", "image_base64": base64_encoded_image}
     except requests.exceptions.RequestException as e:
         logger.error(f"MCP Tool: API request failed for get_raw_snapshot at {url}: {e}")
-        return {"status": "error", "message": f"API request failed: {e}", "url": url}
+        return {"status": "error", "message": f"API request failed: {e}"}
     except Exception as e:
         logger.exception(f"MCP Tool: Unexpected error during get_raw_snapshot request to {url}")
-        return {"status": "error", "message": f"Unexpected error: {e}", "url": url}
+        return {"status": "error", "message": f"Unexpected error: {e}"}
 
 # --- End New Tools ---
 
