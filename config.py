@@ -11,7 +11,7 @@ TEMPLATE_FOLDER = 'templates'
 os.makedirs(STATIC_FOLDER, exist_ok=True)
 
 # Model and Stream Configuration (Moved from runtime)
-YOLO_MODEL_PATH = "yolo12n.pt" # Or yolo12n.pt if not using TensorRT
+YOLO_MODEL_PATH = "yolo12n.pt" # Default to the PyTorch model
 # Load environment variables from .env file
 load_dotenv()
 

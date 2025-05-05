@@ -5,12 +5,13 @@ import math
 import threading
 from collections import deque
 import logging # Import logging
+import platform # Import platform module
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
 
 class ObjectDetector:
-    def __init__(self, model, frame_queue, annotation_queue, stop_event, results_update_callback, max_track_points, model_names):
+    def __init__(self, model, frame_queue, annotation_queue, stop_event, results_update_callback, max_track_points, model_names, tracker_config_path=None): # Add tracker_config_path
         self.model = model
         self.frame_queue = frame_queue
         self.annotation_queue = annotation_queue
@@ -18,7 +19,23 @@ class ObjectDetector:
         self.results_update_callback = results_update_callback
         self.max_track_points = max_track_points
         self.model_names = model_names
+        self.tracker_config_path = tracker_config_path # Store the path
         self.thread = None
+        # Determine device based on OS
+        if platform.system() == "Darwin": # macOS
+            self.device = 'mps'
+        elif platform.system() == "Linux": # Assuming Linux is Jetson/other CUDA-capable
+            # You might want more specific checks for CUDA availability here
+            import torch
+            if torch.cuda.is_available():
+                self.device = 'cuda:0' # Or 'cuda'
+            else:
+                self.device = 'cpu'
+            # For simplicity, assuming CUDA is available on Linux for now
+            # self.device = 'cuda:0' # Or 'cuda'  # This line is now redundant
+        else:
+            self.device = 'cpu' # Fallback to CPU
+        logger.info(f"Using device: {self.device}")
         # Keep track history and info local to the detection process within the thread loop
         # They will be passed back via the callback
 
@@ -39,8 +56,26 @@ class ObjectDetector:
                 except queue.Empty:
                     continue
 
-                # Perform detection
-                results = self.model.track(frame, persist=True, verbose=False, device='mps')
+                # --- Time the inference ---
+                start_time = time.perf_counter()
+                # Perform detection using the determined device
+                # Pass the tracker config if provided
+                track_args = {
+                    "source": frame,
+                    "persist": True,
+                    "verbose": False,
+                    "conf": 0.25,
+                    "device": self.device
+                }
+                if self.tracker_config_path:
+                    track_args["tracker"] = self.tracker_config_path
+
+                results = self.model.track(**track_args)
+                end_time = time.perf_counter()
+                inference_time_ms = (end_time - start_time) * 1000
+                logger.debug(f"Inference time: {inference_time_ms:.2f} ms")
+                # --------------------------
+
                 current_detections = [] # Store detections for this specific frame
                 frame_shape = frame.shape[:2] # Store height, width of the processed frame
 

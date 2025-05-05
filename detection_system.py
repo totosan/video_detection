@@ -2,6 +2,9 @@ import queue
 import threading
 import time
 import logging
+import platform # Import platform
+import os       # Import os
+import torch    # Import torch to check CUDA
 from collections import deque
 from ultralytics import YOLO
 
@@ -9,6 +12,9 @@ from ultralytics import YOLO
 from frame_grabber import FrameGrabber
 from object_detector import ObjectDetector
 from config import MAX_TRACK_POINTS, YOLO_MODEL_PATH, RTSP_STREAM_URL # Import static config
+
+# Define the path to the custom tracker config
+CUSTOM_TRACKER_CONFIG = "small_object_tracker.yaml"
 
 # Add imports for annotation
 import cv2
@@ -22,16 +28,55 @@ class DetectionSystem:
         logger.info("Initializing DetectionSystem...")
         # --- Configuration ---
         self.rtsp_stream_url = RTSP_STREAM_URL
-        self.yolo_model_path = YOLO_MODEL_PATH
+        self.yolo_model_path_config = YOLO_MODEL_PATH # Store the config path (e.g., "yolo.pt")
         self.max_track_points = MAX_TRACK_POINTS
+
+        # --- Determine Model Path based on TensorRT/CUDA availability ---
+        model_path_to_load = self.yolo_model_path_config # Default to .pt
+        can_use_tensorrt = False
+        system_os = platform.system()
+
+        # Check if CUDA is available (primary requirement for TensorRT with YOLO)
+        try:
+            cuda_available = torch.cuda.is_available()
+            if cuda_available:
+                # Prioritize TensorRT (.engine) if CUDA is available (typically on Linux/Jetson)
+                # You might add more specific checks here if needed (e.g., import tensorrt)
+                can_use_tensorrt = True
+                logger.info("CUDA is available. Checking for TensorRT engine.")
+            else:
+                logger.info("CUDA not available.")
+        except Exception as e:
+             logger.warning(f"Could not check CUDA availability: {e}. Assuming TensorRT is not usable.")
+             cuda_available = False # Ensure it's False if check fails
+
+        if can_use_tensorrt:
+            # Try to find/use the .engine file
+            base_name = os.path.splitext(self.yolo_model_path_config)[0]
+            engine_path = base_name + ".engine"
+            if os.path.exists(engine_path):
+                model_path_to_load = engine_path
+                logger.info(f"Using TensorRT engine: {model_path_to_load}")
+            else:
+                logger.warning(f"CUDA available, but TensorRT engine not found at {engine_path}. Falling back to PyTorch model: {self.yolo_model_path_config}")
+                model_path_to_load = self.yolo_model_path_config # Explicitly set fallback
+        else:
+             # Log reason for using PyTorch model
+             if system_os == "Darwin":
+                 logger.info(f"macOS detected. Using PyTorch model: {model_path_to_load}")
+             elif not cuda_available:
+                 logger.info(f"CUDA not available on {system_os}. Using PyTorch model: {model_path_to_load}")
+             else:
+                 # Should not happen with current logic, but as a safeguard
+                 logger.info(f"Using PyTorch model ({model_path_to_load}) due to other reasons (OS: {system_os}, CUDA: {cuda_available}).")
+             # .pt model is already the default (model_path_to_load)
 
         # --- Model Loading ---
         try:
-            self.model = YOLO(self.yolo_model_path)  # Load the YOLO model
-            self.model.devices = 'mps'  # Set device to MPS (Metal Performance Shaders) for macOS
-            logger.info(f"Loaded YOLO model from {self.yolo_model_path}")
+            self.model = YOLO(model_path_to_load)  # Load the determined YOLO model
+            logger.info(f"Loaded YOLO model from {model_path_to_load}")
         except Exception as e:
-            logger.exception("Failed to load YOLO model. Cannot initialize DetectionSystem.")
+            logger.exception(f"Failed to load YOLO model from {model_path_to_load}. Cannot initialize DetectionSystem.")
             raise  # Re-raise the exception to prevent system from starting incorrectly
 
         # --- Runtime State ---
@@ -48,8 +93,8 @@ class DetectionSystem:
         self.stop_event = threading.Event()
 
         # --- Queues ---
-        self.frame_queue = queue.Queue(maxsize=5) # Queue for frames awaiting detection
-        self.annotation_queue = queue.Queue(maxsize=10)  # Queue for frames awaiting annotation
+        self.frame_queue = queue.Queue(maxsize=2) # Queue for frames awaiting detection
+        self.annotation_queue = queue.Queue(maxsize=2)  # Queue for frames awaiting annotation
 
         # --- Worker Threads ---
         self.frame_grabber = None
@@ -185,7 +230,8 @@ class DetectionSystem:
             stop_event=self.stop_event,
             results_update_callback=self.update_detection_results,
             max_track_points=self.max_track_points,
-            model_names=self.model.names
+            model_names=self.model.names,
+            tracker_config_path=CUSTOM_TRACKER_CONFIG # Pass the custom config path
         )
         self.annotation_worker = AnnotationWorker(
             annotation_queue=self.annotation_queue,
