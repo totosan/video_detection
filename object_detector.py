@@ -10,6 +10,10 @@ import platform # Import platform module
 # Get logger for this module
 logger = logging.getLogger(__name__)
 
+# --- Configuration ---
+FRAME_SKIP_FACTOR = 2 # Process every Nth frame (e.g., 2 means process 1, skip 1, process 1, ...)
+# -------------------
+
 class ObjectDetector:
     def __init__(self, model, frame_queue, annotation_queue, stop_event, results_update_callback, max_track_points, model_names, tracker_config_path=None): # Add tracker_config_path
         self.model = model
@@ -48,6 +52,7 @@ class ObjectDetector:
         # Initialize tracking data here, it will be passed back via callback
         track_history = {} # {track_id: deque(points)}
         tracked_objects_info = {} # {track_id: {'name': str, 'last_seen': float, ...}}
+        frame_counter = 0 # Initialize frame counter
 
         try:
             while not self.stop_event.is_set():
@@ -56,13 +61,25 @@ class ObjectDetector:
                 except queue.Empty:
                     continue
 
+                frame_counter += 1
+
+                # --- Skip Frame Logic ---
+                if FRAME_SKIP_FACTOR > 1 and frame_counter % FRAME_SKIP_FACTOR != 1:
+                    # Skip processing this frame, but mark task as done
+                    self.frame_queue.task_done()
+                    # Optional: Add a small sleep to yield CPU if needed,
+                    # but usually the queue.get timeout handles this.
+                    # time.sleep(0.001)
+                    continue # Skip to the next frame
+                # ------------------------
+
                 # --- Time the inference ---
                 start_time = time.perf_counter()
                 # Perform detection using the determined device
                 # Pass the tracker config if provided
                 track_args = {
                     "source": frame,
-                    "persist": True,
+                    "persist": True, # Important for tracking across skipped frames
                     "verbose": False,
                     "conf": 0.25,
                     "device": self.device
@@ -73,25 +90,13 @@ class ObjectDetector:
                 results = self.model.track(**track_args)
                 end_time = time.perf_counter()
                 inference_time_ms = (end_time - start_time) * 1000
-                logger.debug(f"Inference time: {inference_time_ms:.2f} ms")
+                logger.debug(f"Inference time: {inference_time_ms:.2f} ms on frame {frame_counter}")
                 # --------------------------
 
                 current_detections = [] # Store detections for this specific frame
                 frame_shape = frame.shape[:2] # Store height, width of the processed frame
 
-                # Enqueue raw detection data and frame for annotation
-                try:
-                    self.annotation_queue.put_nowait((
-                        current_detections,
-                        frame_shape,
-                        track_history,
-                        tracked_objects_info,
-                        frame.copy()
-                    ))
-                except queue.Full:
-                    logger.warning("Annotation queue is full; dropping frame annotation task.")
-
-                # Process results
+                # Process results (only if the frame wasn't skipped)
                 if results and results[0].boxes is not None:
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     confs = results[0].boxes.conf.cpu().numpy()
@@ -128,21 +133,12 @@ class ObjectDetector:
                             # Update tracked_objects_info
                             tracked_objects_info[track_id] = {
                                 'name': self.model.names[int(cl)],
-                                'last_seen': time.time(),
+                                'last_seen': time.time(), # Use current time
                                 'last_box': (x1, y1, x2, y2)
                             }
-
-                        # --- Clean up old tracks --- 
-                        # Remove tracks that haven't been seen in this frame
-                        # This is a simple approach; more robust methods exist (e.g., time-based expiry)
-                        # Be careful modifying dict while iterating; create a list of keys to remove
-                        # removed_ids = [tid for tid in track_history if tid not in current_frame_track_ids]
-                        # for tid in removed_ids:
-                        #     del track_history[tid]
-                        #     if tid in tracked_objects_info:
-                        #         del tracked_objects_info[tid]
-                        # Consider a time-based cleanup in the DetectionSystem or here if needed
-                        # ---------------------------
+                        # Note: Track cleanup logic might need adjustment if skipping many frames.
+                        # The 'persist=True' helps YOLO maintain tracks, but very large skips
+                        # might still cause tracks to be lost or reassigned incorrectly.
 
                     else:
                         # Extract non-tracked detections
@@ -158,7 +154,21 @@ class ObjectDetector:
                                 'center': None
                             })
 
-                # Update central state with raw detection data
+                # Enqueue raw detection data and frame for annotation
+                # Important: Enqueue even if no detections, but only if frame was processed
+                try:
+                    self.annotation_queue.put_nowait((
+                        current_detections,
+                        frame_shape,
+                        track_history,
+                        tracked_objects_info,
+                        frame.copy() # Send the frame that was actually processed
+                    ))
+                except queue.Full:
+                    logger.warning("Annotation queue is full; dropping frame annotation task.")
+
+
+                # Update central state with raw detection data from the processed frame
                 self.results_update_callback(
                     current_detections,
                     frame_shape,
