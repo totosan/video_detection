@@ -100,7 +100,7 @@ def get_current_detections() -> dict:
         logger.error(f"MCP Tool: Error from API for get_current_detections: {result['error']}")
     # Assuming the API returns a dict like {"detections": [...]}, pass it through.
     # If the API returns just the list, wrap it: return {"detections": result}
-    return result # Return the raw API response (or error dict)
+    return {"detections": result['detections']} # Return the raw API response (or error dict)
 
 @mcp.tool()
 def get_tracked_objects() -> dict:
