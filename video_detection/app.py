@@ -227,23 +227,49 @@ def snapshot():
 
 @app.route('/raw_snapshot')
 def raw_snapshot():
-    """Returns a single JPEG snapshot directly from the RTSP stream (no threads)."""
-    logger.debug("Raw snapshot: Opening direct RTSP capture.")
-    # Use the URL from config
-    cap = cv2.VideoCapture(RTSP_STREAM_URL, cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        logger.error(f"Raw snapshot: Unable to open stream {RTSP_STREAM_URL}") # Use error
-        return ("Cannot open stream", 503)
+    """Returns a single JPEG snapshot directly from the configured source (no threads)."""
+    logger.debug("Raw snapshot: Attempting direct capture from configured source.")
+    
+    cap = None
+    source_to_open = RTSP_STREAM_URL # From config.py
+    is_device = False
+
+    if source_to_open.isdigit():
+        try:
+            device_index = int(source_to_open)
+            logger.debug(f"Raw snapshot: Source is device index {device_index}.")
+            cap = cv2.VideoCapture(device_index)
+            is_device = True
+        except ValueError:
+            logger.warning(f"Raw snapshot: Could not parse '{source_to_open}' as device index, trying as URL.")
+            # Fall through to RTSP logic
+            pass 
+    
+    if not is_device: # Either it wasn't a digit, or parsing as int failed
+        if not source_to_open:
+            logger.error("Raw snapshot: Video source URL is empty in config.")
+            return ("Video source URL is empty", 503)
+        logger.debug(f"Raw snapshot: Source is URL '{source_to_open}'. Attempting with FFMPEG backend.")
+        # For RTSP or file paths, FFMPEG is generally a good choice
+        cap = cv2.VideoCapture(source_to_open, cv2.CAP_FFMPEG)
+
+    if cap is None or not cap.isOpened():
+        logger.error(f"Raw snapshot: Unable to open source {source_to_open}")
+        return ("Cannot open video source", 503)
+    
     ret, frame = cap.read()
     cap.release()
+    
     if not ret or frame is None:
-        logger.error("Raw snapshot: Failed to grab frame.") # Use error
+        logger.error(f"Raw snapshot: Failed to grab frame from {source_to_open}.")
         return ("Failed to grab frame", 503)
+    
     ret2, buf = cv2.imencode('.jpg', frame)
     if not ret2:
-        logger.error("Raw snapshot: Error encoding frame.") # Use error
+        logger.error(f"Raw snapshot: Error encoding frame from {source_to_open}.")
         return ("Error encoding frame", 500)
-    logger.debug("Raw snapshot: Returning JPEG image.")
+    
+    logger.debug(f"Raw snapshot: Returning JPEG image from {source_to_open}.")
     return Response(buf.tobytes(), mimetype='image/jpeg')
 
 # --- Graceful Shutdown --- 

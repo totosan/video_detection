@@ -27,9 +27,32 @@ class DetectionSystem:
     def __init__(self):
         logger.info("Initializing DetectionSystem...")
         # --- Configuration ---
-        self.rtsp_stream_url = RTSP_STREAM_URL
-        self.yolo_model_path_config = YOLO_MODEL_PATH # Store the config path (e.g., "yolo.pt")
+        self.rtsp_stream_url_config = RTSP_STREAM_URL # Store the raw config value
+        self.yolo_model_path_config = YOLO_MODEL_PATH
         self.max_track_points = MAX_TRACK_POINTS
+
+        # --- Determine Source Type and Identifier ---
+        self.source_identifier = None
+        self.source_type = None # "rtsp" or "device"
+
+        if self.rtsp_stream_url_config.isdigit():
+            try:
+                self.source_identifier = int(self.rtsp_stream_url_config)
+                self.source_type = "device"
+                logger.info(f"Configured video source is a device index: {self.source_identifier}")
+            except ValueError: # Should not happen if isdigit() is true, but as a safeguard
+                logger.error(f"Could not parse '{self.rtsp_stream_url_config}' as a device index. Defaulting to RTSP interpretation.")
+                self.source_identifier = self.rtsp_stream_url_config
+                self.source_type = "rtsp"
+        elif not self.rtsp_stream_url_config: # Handle empty string case
+            logger.error("VIDEO_URL is empty. DetectionSystem cannot start without a video source.")
+            # Consider raising an error or setting a state that prevents start()
+            raise ValueError("VIDEO_URL (RTSP_STREAM_URL) is not configured.")
+        else:
+            self.source_identifier = self.rtsp_stream_url_config
+            self.source_type = "rtsp"
+            logger.info(f"Configured video source is an RTSP URL: {self.source_identifier}")
+        # ---------------------------------------------
 
         # --- Determine Model Path based on TensorRT/CUDA availability ---
         model_path_to_load = self.yolo_model_path_config # Default to .pt
@@ -218,7 +241,8 @@ class DetectionSystem:
 
         # Instantiate workers, passing necessary dependencies and callbacks
         self.frame_grabber = FrameGrabber(
-            stream_url=self.rtsp_stream_url,
+            source_identifier=self.source_identifier,
+            source_type=self.source_type,
             frame_queue=self.frame_queue,
             stop_event=self.stop_event,
             frame_update_callback=self.update_latest_frame # Pass the callback
