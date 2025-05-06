@@ -8,7 +8,5 @@ dependencies = [
     "dotenv>=0.9.9",
     "flask>=3.1.0",
     "lap>=0.5.12",
-    "mcp[cli]>=1.7.1",
-    "mcpo>=0.0.13",
     "ultralytics>=8.3.127",
 ]
