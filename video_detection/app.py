@@ -9,6 +9,7 @@ from flask import Flask, render_template, Response, jsonify, request
 import logging # Import logging
 import atexit # To ensure cleanup on exit
 import collections # Import collections for deque type checking
+import base64 # Import base64 for image encoding
 
 # Import static config and the new system manager
 from config import STATIC_FOLDER, TEMPLATE_FOLDER, RTSP_STREAM_URL # Only import static config
@@ -84,34 +85,36 @@ def api_tracked_objects():
     """API endpoint to get the latest tracked object information."""
     current_time = time.time()
     objects_list = []
-    # Get tracked info from the detection system
     tracked_info = detection_system.get_tracked_objects_info()
 
-    # Create a copy of the keys to avoid runtime errors if the dict changes during iteration
-    current_tracked_ids = list(tracked_info.keys())
+    logger.debug(f"API called: Processing {len(tracked_info)} tracked objects")
 
-    for track_id in current_tracked_ids:
-        if track_id in tracked_info: # Check if ID still exists
-            info = tracked_info[track_id]
-            time_since_seen = round(current_time - info.get('last_seen', current_time), 1)
-            objects_list.append({
-                'id': track_id,
-                'name': info.get('name', 'Unknown'),
-                'last_seen_timestamp': info.get('last_seen', 0), # Send the raw timestamp
-                'time_since_seen': time_since_seen
-                # Add other fields from info if needed by JS
-            })
+    for track_id, info in tracked_info.items():
+        time_since_seen = round(current_time - info.get('last_seen', current_time), 1)
+        object_data = {
+            'id': track_id,
+            'name': info.get('name', 'Unknown'),
+            'time_since_seen': time_since_seen
+        }
+
+        # Use image data directly from tracked_info if available
+        if 'detection_image' in info and info['detection_image'] is not None:
+            logger.debug(f"Track ID {track_id}: Found detection image in tracked_info, encoding to base64")
+            try:
+                ret, buffer = cv2.imencode('.jpg', info['detection_image'])
+                if ret:
+                    object_data['detection_image'] = base64.b64encode(buffer).decode('utf-8')
+                else:
+                    logger.warning(f"Track ID {track_id}: Failed to encode detection image from tracked_info")
+            except Exception as e:
+                logger.exception(f"Track ID {track_id}: Error encoding detection image from tracked_info: {e}")
         else:
-             logger.info(f"API: Track ID {track_id} disappeared during list creation.")
+            logger.debug(f"Track ID {track_id}: No detection image available in tracked_info")
 
-    # Sort by time_since_seen (most recent first)
-    objects_list.sort(key=lambda x: x['time_since_seen'])
+        objects_list.append(object_data)
 
-    try:
-        return jsonify(objects_list) # Return the list
-    except Exception as e:
-        logger.exception("API: Error converting tracked_objects list to JSON") # Use exception
-        return jsonify({"error": "Failed to serialize tracked objects data"}), 500
+    logger.debug(f"API Response: {len(objects_list)} objects, {sum(1 for obj in objects_list if 'detection_image' in obj)} with images")
+    return jsonify(objects_list)
 
 # --- New API Endpoint for Current Detections ---
 @app.route('/api/current_detections')
@@ -122,7 +125,7 @@ def api_current_detections():
         # Ensure detections is always a list, even if None initially
         if data.get('detections') is None:
             data['detections'] = []
-        return jsonify(data)
+        return jsonify(data)  # Now contains JSON-serializable data
     except Exception as e:
         logger.exception("API: Error getting or serializing current detections data")
         return jsonify({"error": "Failed to get current detections data"}), 500
@@ -167,6 +170,9 @@ def api_status():
 def api_track_history():
     """API endpoint to get the history of tracked objects."""
     try:
+        # Get query parameter to determine if images should be included
+        include_images = request.args.get('include_images', 'false').lower() == 'true'
+        
         history = detection_system.get_track_history()
         # Convert history keys (track_id) to strings if they are not already,
         # as JSON keys must be strings.
@@ -191,6 +197,24 @@ def api_track_history():
                      else:
                          # Assume other types are directly serializable
                          serializable_data[key] = value
+                 
+                 # Add detection image if requested
+                 if include_images:
+                     try:
+                         # Get image for this track_id from detection system
+                         detection_image = detection_system.get_detection_image(track_id)
+                         if detection_image is not None:
+                             # Convert the image to JPEG bytes
+                             ret, buffer = cv2.imencode('.jpg', detection_image)
+                             if ret:
+                                 # Convert to base64 for JSON
+                                 jpg_as_text = base64.b64encode(buffer).decode('utf-8')
+                                 serializable_data['detection_image'] = jpg_as_text
+                             else:
+                                 logger.warning(f"Failed to encode detection image for track_id {track_id}")
+                     except Exception as img_err:
+                         logger.exception(f"Error getting detection image for track_id {track_id}: {img_err}")
+                 
                  serializable_history[str(track_id)] = serializable_data
              else:
                  logger.warning(f"API: Skipping track_id {track_id} in history serialization because its data is not a dictionary (type: {type(data)}).")

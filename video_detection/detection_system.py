@@ -108,6 +108,10 @@ class DetectionSystem:
         self.latest_detections_data = {"results": None, "frame_shape": None, "track_history": {}, "tracked_objects_info": {}}
         self.backend_annotation_enabled = False # Flag for backend annotation
 
+        # Dictionary to store detection images by track ID
+        self.detection_images = {}
+        self.detection_images_lock = threading.Lock()
+
         # --- Synchronization Primitives ---
         self.frame_lock = threading.Lock()
         self.annotated_frame_lock = threading.Lock()
@@ -134,12 +138,65 @@ class DetectionSystem:
             # logger.debug("DetectionSystem: Updated latest_frame") # Optional: can be noisy
 
     # Modified: Only updates raw detection data, no annotated frame here
-    def update_detection_results(self, detections, frame_shape, track_history, tracked_objects_info):
+    def update_detection_results(self, detections, frame_shape, track_history, tracked_objects_info, detection_images=None):
         with self.detections_data_lock:
             self.latest_detections_data["results"] = detections
             self.latest_detections_data["frame_shape"] = frame_shape
             self.latest_detections_data["track_history"] = track_history
             self.latest_detections_data["tracked_objects_info"] = tracked_objects_info
+
+            # Add detailed debugging for detection_images
+            if detection_images is None:
+                logger.warning("detection_images parameter is None")  # Fixed missing closing quote
+            elif not isinstance(detection_images, dict):
+                logger.warning(f"detection_images is not a dictionary: {type(detection_images)}")
+            elif not detection_images:
+                logger.warning("detection_images dictionary is empty")
+            else:
+                logger.debug(f"Received detection_images with {len(detection_images)} entries: {list(detection_images.keys())}")
+
+            # Update detection images if provided
+            if detection_images:
+                with self.detection_images_lock:
+                    stored_count = 0
+                    error_count = 0
+                    for track_id, image in detection_images.items():
+                        if image is None:
+                            logger.warning(f"Skipping None image for track_id {track_id}")
+                            continue
+                        try:
+                            # Check if this is actually an image
+                            if not isinstance(image, np.ndarray):
+                                logger.warning(f"Image for track_id {track_id} is not a numpy array: {type(image)}")
+                                error_count += 1
+                                continue
+                            if image.size == 0 or image.shape[0] == 0 or image.shape[1] == 0:
+                                logger.warning(f"Empty image for track_id {track_id}, shape: {image.shape}")
+                                continue
+                            # Store the valid image
+                            self.detection_images[track_id] = image
+                            stored_count += 1
+                            logger.debug(f"✅ Stored valid image for track_id {track_id}, shape: {image.shape}")
+                        except Exception as e:
+                            logger.error(f"Error storing image for track_id {track_id}: {e}")
+                            error_count += 1
+                    logger.debug(f"Detection image storage summary: stored {stored_count}, errors {error_count}")
+
+                # Optional: Clean up old images that are no longer in tracked_objects_info
+                current_track_ids = set(tracked_objects_info.keys())
+                old_track_ids = set(self.detection_images.keys()) - current_track_ids
+                cleaned_count = 0
+                for old_id in old_track_ids:
+                    # Keep images for a while even after tracking is lost (optional)
+                    last_seen = time.time() - 30  # Default to 30 seconds ago if not found
+                    if old_id in tracked_objects_info:
+                        last_seen = tracked_objects_info[old_id].get('last_seen', time.time())
+                    # Remove if not seen for more than 30 seconds
+                    if time.time() - last_seen > 30:
+                        del self.detection_images[old_id]
+                        cleaned_count += 1
+                logger.debug(f"Cleaned up {cleaned_count} old images")
+                logger.debug(f"DetectionSystem state: {len(self.detection_images)} images in storage")
 
     # New callback for the annotation worker
     def update_latest_annotated_frame(self, annotated_frame):
@@ -147,7 +204,6 @@ class DetectionSystem:
             self.latest_annotated_frame = annotated_frame
 
     # --- Getters for Flask App ---
-
     def get_latest_frame(self):
         with self.frame_lock:
             return self.latest_frame.copy() if self.latest_frame is not None else None
@@ -158,7 +214,7 @@ class DetectionSystem:
 
     def get_tracked_objects_info(self):
         with self.detections_data_lock:
-            return self.latest_detections_data["tracked_objects_info"].copy()
+            return self.latest_detections_data["tracked_objects_info"].copy() # Make a deep copy to be safe
 
     def get_track_history(self):
         with self.detections_data_lock:
@@ -170,7 +226,8 @@ class DetectionSystem:
         with self.detections_data_lock:
             detections = self.latest_detections_data.get("results", [])
             shape = self.latest_detections_data.get("frame_shape")
-            track_history_deques = self.latest_detections_data.get("track_history", {}) # Get track history (deques)
+            track_history_deques = self.latest_detections_data.get("track_history", {})
+            tracked_objects_info = self.latest_detections_data.get("tracked_objects_info", {})
 
             frame_width = None
             frame_height = None
@@ -180,16 +237,42 @@ class DetectionSystem:
 
             # Convert deques to lists for JSON serialization
             track_history_lists = {
-                track_id: list(points)
+                str(track_id): list(points)
                 for track_id, points in track_history_deques.items()
             }
 
-            # Return the necessary parts for client-side drawing
+            # --- Serialize YOLO Results as per UI expectation ---
+            serializable_detections = []
+            if detections and hasattr(detections, "__getitem__"):
+                for det in detections:
+                    if hasattr(det, "boxes") and det.boxes is not None:
+                        boxes = det.boxes
+                        xyxy = boxes.xyxy.cpu().numpy()
+                        confs = boxes.conf.cpu().numpy()
+                        clss = boxes.cls.cpu().numpy()
+                        track_ids = boxes.id.cpu().numpy() if hasattr(boxes, "id") and boxes.id is not None else [None]*len(xyxy)
+                        for i in range(len(xyxy)):
+                            box = [float(x) for x in xyxy[i]]
+                            conf = float(confs[i])
+                            cls_idx = int(clss[i])
+                            track_id = int(track_ids[i]) if track_ids[i] is not None else None
+                            label = self.model.names[cls_idx] if cls_idx < len(self.model.names) else "unknown"
+                            # Color: try to get from tracked_objects_info, else fallback
+                            color = tracked_objects_info.get(track_id, {}).get('color', [(track_id or 0)*50%255, (track_id or 0)*80%255, (track_id or 0)*120%255])
+                            serializable_detections.append({
+                                "box": box,
+                                "conf": conf,
+                                "cls": cls_idx,
+                                "label": label,
+                                "track_id": track_id,
+                                "color": color
+                            })
+            # ...existing code...
             return {
-                "detections": detections,
+                "detections": serializable_detections,
                 "frame_width": frame_width,
                 "frame_height": frame_height,
-                "track_history": track_history_lists # Return lists instead of deques
+                "track_history": track_history_lists
             }
     # -----------------------------------------
 
@@ -217,7 +300,6 @@ class DetectionSystem:
     # ----------------------------------
 
     # --- Lifecycle Management ---
-
     def start(self):
         if self.frame_grabber or self.object_detector or self.annotation_worker:
             logger.warning("Detection system already running or not properly stopped.")
@@ -236,8 +318,7 @@ class DetectionSystem:
         self.latest_frame = None
         self.latest_annotated_frame = None
         self.latest_detections_data = {"results": None, "frame_shape": None, "track_history": {}, "tracked_objects_info": {}}
-
-        # tracked data cleared via resetting latest_detections_data
+        # tracked data cleared via resetting latest_detections_data instead of deques
 
         # Instantiate workers, passing necessary dependencies and callbacks
         self.frame_grabber = FrameGrabber(
@@ -301,6 +382,10 @@ class DetectionSystem:
             self.frame_grabber.stop() # Assuming FrameGrabber also has a stop method
             self.frame_grabber = None
 
+        # Clear cached images
+        with self.detection_images_lock:
+            self.detection_images.clear()
+
         logger.info("DetectionSystem threads stopped.")
 
     def is_running(self):
@@ -309,4 +394,21 @@ class DetectionSystem:
         detector_alive = self.object_detector and self.object_detector.is_alive()
         annotator_alive = self.annotation_worker and self.annotation_worker.is_alive()
         return grabber_alive and detector_alive and annotator_alive
+
+    def get_detection_image(self, track_id):
+        """Get the detection image for a specific track ID.
+        
+        Args:
+            track_id: The ID of the tracked object.
+        
+        Returns:
+            np.ndarray: The image of the detected object, or None if not available.
+        """
+        with self.detection_images_lock:
+            image = self.detection_images.get(track_id)
+            if image is not None:
+                logger.debug(f"Retrieved detection image for track ID {track_id}, shape: {image.shape}")
+            else:
+                logger.debug(f"No detection image found for track ID {track_id}")
+            return image
 

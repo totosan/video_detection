@@ -29,14 +29,18 @@
         }
         .controls { text-align: center; margin-bottom: 20px; }
         button { padding: 8px 15px; font-size: 1em; cursor: pointer; }
+        /* Added for toggling visibility */
+        .hidden {
+            display: none;
+        }
     </style>
 </head>
 <body>
     <h1>Live Object Detection Feed</h1>
 
     <div class="controls">
-        <button id="toggleBackendAnnotationBtn">Toggle Backend Annotation</button>
-        <span id="backendAnnotationStatus">Status: Unknown</span>
+        <button id="toggleDebugRenderingBtn">Toggle Debug Rendering</button>
+        <span id="debugRenderingStatus">Status: Unknown</span>
     </div>
 
     <div class="stream-container">
@@ -47,9 +51,9 @@
         </div>
     </div>
 
-    <div class="stream-container">
-        <h2>Annotated Feed (Backend Detections)</h2>
-        <img src="{{ url_for('video_feed_annotated') }}" width="640" height="360" alt="Annotated Video Feed">
+    <div id="debugRenderingContainer" class="stream-container">
+        <h2>Debug Rendering View (Backend Processing)</h2>
+        <img src="{{ url_for('video_feed_annotated') }}" width="640" height="360" alt="Debug Rendering Feed">
     </div>
 
     <div id="tracked-objects">
@@ -109,11 +113,12 @@
         // Initial load
         updateTrackedObjects();
 
-        // --- Backend Annotation Toggle ---
-        const toggleBtn = document.getElementById('toggleBackendAnnotationBtn');
-        const statusSpan = document.getElementById('backendAnnotationStatus');
+        // --- Debug Rendering Toggle ---
+        const toggleBtn = document.getElementById('toggleDebugRenderingBtn');
+        const statusSpan = document.getElementById('debugRenderingStatus');
+        const debugRenderingContainer = document.getElementById('debugRenderingContainer');
 
-        async function fetchBackendAnnotationStatus() {
+        async function fetchDebugRenderingStatus() {
             try {
                 const response = await fetch('/api/backend_annotation/status');
                 if (!response.ok) {
@@ -122,15 +127,14 @@
                 const data = await response.json();
                 updateButtonStatus(data.backend_annotation_enabled);
 
-                // Enable or disable the annotated view based on the status
-                //const annotatedFeed = document.querySelector('.stream-container');
-                //if (data.backend_annotation_enabled) {
-                //    annotatedFeed.style.display = 'block'; // Show annotated feed
-                //} else {
-                //    annotatedFeed.style.display = 'none'; // Hide annotated feed
-                //}
+                // Show or hide the debug rendering feed based on the status
+                if (data.backend_annotation_enabled) {
+                    debugRenderingContainer.classList.remove('hidden');
+                } else {
+                    debugRenderingContainer.classList.add('hidden');
+                }
             } catch (error) {
-                console.error('Error fetching backend annotation status:', error);
+                console.error('Error fetching debug rendering status:', error);
                 statusSpan.textContent = 'Status: Error';
             }
         }
@@ -138,12 +142,14 @@
         function updateButtonStatus(isEnabled) {
             if (isEnabled) {
                 statusSpan.textContent = 'Status: Enabled';
-                // Optional: Change button text or style
-                // toggleBtn.textContent = 'Disable Backend Annotation';
+                debugRenderingContainer.classList.remove('hidden');
+                // Update button text for clarity
+                toggleBtn.textContent = 'Hide Debug Rendering';
             } else {
                 statusSpan.textContent = 'Status: Disabled';
-                // Optional: Change button text or style
-                // toggleBtn.textContent = 'Enable Backend Annotation';
+                debugRenderingContainer.classList.add('hidden');
+                // Update button text for clarity
+                toggleBtn.textContent = 'Show Debug Rendering';
             }
         }
 
@@ -157,16 +163,16 @@
                 const data = await response.json();
                 updateButtonStatus(data.backend_annotation_enabled);
             } catch (error) {
-                console.error('Error toggling backend annotation:', error);
+                console.error('Error toggling debug rendering:', error);
                 statusSpan.textContent = 'Status: Error';
                 // Fetch status again to be sure
-                fetchBackendAnnotationStatus();
+                fetchDebugRenderingStatus();
             }
         });
 
         // Fetch initial status on page load
-        fetchBackendAnnotationStatus();
-        // --- End Backend Annotation Toggle ---
+        fetchDebugRenderingStatus();
+        // --- End Debug Rendering Toggle ---
 
         // --- Client-Side Detection Drawing ---
         const videoFeed = document.getElementById('videoFeed');
@@ -317,6 +323,51 @@
 
         // --- End Client-Side Detection Drawing ---
 
+        // --- Updated Tracked Objects List ---
+        function updateTrackedObjectsList() {
+            fetch('/api/tracked_objects')
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Received tracked objects:", data); // Debugging log
+                    const trackedObjectsList = document.getElementById('tracked-objects-list');
+                    trackedObjectsList.innerHTML = ''; // Clear current list
+
+                    if (data.length === 0) {
+                        trackedObjectsList.innerHTML = '<li>No objects tracked recently.</li>';
+                        return;
+                    }
+
+                    data.forEach(obj => {
+                        const listItem = document.createElement('li');
+                        listItem.className = 'list-group-item';
+
+                        // Add thumbnail if available
+                        if (obj.detection_image) {
+                            const img = document.createElement('img');
+                            img.src = 'data:image/jpeg;base64,' + obj.detection_image;
+                            img.alt = `Object ${obj.id}`;
+                            img.style.width = '60px';
+                            img.style.height = '60px';
+                            listItem.appendChild(img);
+                        } else {
+                            console.warn(`No image for object ID ${obj.id}`); // Debugging log
+                        }
+
+                        // Add object details
+                        const text = document.createTextNode(`ID: ${obj.id}, Name: ${obj.name}`);
+                        listItem.appendChild(text);
+
+                        trackedObjectsList.appendChild(listItem);
+                    });
+                })
+                .catch(error => {
+                    console.error("Error fetching tracked objects:", error);
+                });
+        }
+
+        // Call this function when the page loads and periodically
+        updateTrackedObjectsList();
+        setInterval(updateTrackedObjectsList, 2000); // Update every 2 seconds
     </script>
 </body>
 </html>

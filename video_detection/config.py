@@ -24,7 +24,7 @@ RTSP_STREAM_URL = VIDEO_URL
 MAX_TRACK_POINTS = 30
 
 # --- Logging Configuration ---
-DEBUG = False # Set to True for verbose debug logging, False for info/warnings only
+DEBUG = True # Set to True for verbose debug logging, False for info/warnings only
 LOG_LEVEL = logging.DEBUG if DEBUG else logging.INFO
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
