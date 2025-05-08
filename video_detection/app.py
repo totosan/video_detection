@@ -125,7 +125,29 @@ def api_current_detections():
         # Ensure detections is always a list, even if None initially
         if data.get('detections') is None:
             data['detections'] = []
-        return jsonify(data)  # Now contains JSON-serializable data
+
+        # Add detection images (cropped regions) for each detection
+        detection_image = detection_system.get_latest_frame()
+        if detection_image is not None:
+            for detection in data['detections']:
+                try:
+                    box = detection.get('box')  # [x_min, y_min, x_max, y_max]
+                    if box and len(box) == 4:
+                        x_min, y_min, x_max, y_max = map(int, box)
+                        cropped_image = detection_image[y_min:y_max, x_min:x_max]
+                        ret, buffer = cv2.imencode('.jpg', cropped_image)
+                        if ret:
+                            detection['image'] = base64.b64encode(buffer).decode('utf-8')
+                        else:
+                            logger.warning("current_detections: Could not encode cropped detection image to JPEG")
+                    else:
+                        logger.warning("current_detections: Invalid bounding box format")
+                except Exception as e:
+                    logger.exception("current_detections: Error processing detection image")
+        else:
+            logger.warning("current_detections: No latest frame available for cropping detection images")
+
+        return jsonify(data)  # Now contains JSON-serializable data and detection images
     except Exception as e:
         logger.exception("API: Error getting or serializing current detections data")
         return jsonify({"error": "Failed to get current detections data"}), 500

@@ -241,7 +241,7 @@ class DetectionSystem:
                 for track_id, points in track_history_deques.items()
             }
 
-            # --- Serialize YOLO Results as per UI expectation ---
+            # Serialize YOLO Results as per UI expectation
             serializable_detections = []
             if detections and hasattr(detections, "__getitem__"):
                 for det in detections:
@@ -267,7 +267,6 @@ class DetectionSystem:
                                 "track_id": track_id,
                                 "color": color
                             })
-            # ...existing code...
             return {
                 "detections": serializable_detections,
                 "frame_width": frame_width,
@@ -411,4 +410,9 @@ class DetectionSystem:
             else:
                 logger.debug(f"No detection image found for track ID {track_id}")
             return image
+
+    def get_latest_detection_image(self):
+        """Returns the latest detection image for use in the API."""
+        with self.frame_lock:
+            return self.latest_frame.copy() if self.latest_frame is not None else None
 
