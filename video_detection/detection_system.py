@@ -432,3 +432,24 @@ class DetectionSystem:
         with self.frame_lock:
             return self.latest_frame.copy() if self.latest_frame is not None else None
 
+    def toggle_tracking_and_bounding_boxes(self):
+        """Toggle the state of tracking and bounding box drawing."""
+        if not hasattr(self, 'draw_tracking_and_bounding_boxes'):
+            self.draw_tracking_and_bounding_boxes = True  # Initialize if not present
+        self.draw_tracking_and_bounding_boxes = not self.draw_tracking_and_bounding_boxes
+        return self.draw_tracking_and_bounding_boxes
+
+    def is_tracking_and_bounding_boxes_enabled(self):
+        """Check if tracking and bounding box drawing is enabled."""
+        return getattr(self, 'draw_tracking_and_bounding_boxes', True)
+
+    def set_object_filter(self, object_filter):
+        """Set the object filter for displaying specific labels."""
+        if not hasattr(self, 'object_filter'):
+            self.object_filter = None  # Initialize if not present
+        self.object_filter = object_filter
+
+    def get_object_filter(self):
+        """Get the current object filter."""
+        return getattr(self, 'object_filter', None)
+

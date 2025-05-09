@@ -43,6 +43,17 @@
         <span id="debugRenderingStatus">Status: Unknown</span>
     </div>
 
+    <div class="controls">
+        <button id="toggleTrackingBtn">Toggle Tracking</button>
+        <span id="trackingStatus">Status: Unknown</span>
+    </div>
+
+    <div class="controls">
+        <label for="objectFilterInput">Object Filter (comma-separated):</label>
+        <input type="text" id="objectFilterInput" placeholder="e.g., car,person">
+        <button id="setObjectFilterBtn">Set Filter</button>
+    </div>
+
     <div class="stream-container">
         <h2>Raw Camera Feed with Client-Side Detections</h2>
         <div class="video-container"> <!-- Add container div -->
@@ -188,15 +199,35 @@
             // console.log(`Canvas resized to: ${canvas.width}x${canvas.height}`);
         }
 
+        const objectFilterInput = document.getElementById('objectFilterInput');
+        const setObjectFilterBtn = document.getElementById('setObjectFilterBtn');
+
+        async function setObjectFilter() {
+            const filterValue = objectFilterInput.value.split(',').map(item => item.trim()).filter(item => item);
+            try {
+                const response = await fetch('/api/set_object_filter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ object_filter: filterValue })
+                });
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                console.log('Object filter set to:', data.object_filter);
+            } catch (error) {
+                console.error('Error setting object filter:', error);
+            }
+        }
+
+        setObjectFilterBtn.addEventListener('click', setObjectFilter);
+
         async function fetchAndDrawDetections() {
             if (!videoFeed.complete || videoFeed.naturalWidth === 0) {
-                // Wait for image to load initially or if the src changes
-                // console.log("Video feed image not ready yet.");
-                requestAnimationFrame(fetchAndDrawDetections); // Try again next frame
+                requestAnimationFrame(fetchAndDrawDetections);
                 return;
             }
 
-            // Ensure canvas is the correct size (might change if layout shifts)
             if (canvas.width !== videoFeed.clientWidth || canvas.height !== videoFeed.clientHeight) {
                 resizeCanvas();
             }
@@ -205,97 +236,64 @@
                 const response = await fetch('/api/current_detections');
                 if (!response.ok) {
                     console.error('Failed to fetch detections:', response.statusText);
-                    // Optionally clear canvas if fetch fails repeatedly
-                    // ctx.clearRect(0, 0, canvas.width, canvas.height);
                     return;
                 }
                 const data = await response.json();
 
-                // Store original dimensions if we get them and they are valid
-                if (data.frame_width && data.frame_height) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                if (!data.detections || data.detections.length === 0) {
+                    return;
+                }
+
+                const objectFilterResponse = await fetch('/api/get_object_filter');
+                const filterData = await objectFilterResponse.json();
+                const objectFilter = filterData.object_filter || [];
+
+                if (objectFilter.length === 0) {
+                    return; // Skip drawing if the filter is empty
+                }
+
+                // Ensure original frame dimensions are set
+                if (!originalFrameWidth || !originalFrameHeight) {
                     originalFrameWidth = data.frame_width;
                     originalFrameHeight = data.frame_height;
                 }
 
-                // Clear previous drawings
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-                if (!originalFrameWidth || !originalFrameHeight || !data.detections || data.detections.length === 0) {
-                    // console.log("No detections or original frame size missing.");
-                    return; // Nothing to draw or cannot scale
-                }
-
-                // Calculate scaling factors based on the *displayed* size vs original size
+                // Calculate scaling factors based on the displayed size vs original size
                 const scaleX = canvas.width / originalFrameWidth;
                 const scaleY = canvas.height / originalFrameHeight;
 
-                // Draw current detections
                 data.detections.forEach(det => {
-                    if (!det.box || det.box.length !== 4) return; // Skip invalid boxes
+                    if (objectFilter.length > 0 && !objectFilter.includes(det.label)) {
+                        return;
+                    }
 
                     const [x1, y1, x2, y2] = det.box;
-                    const label = det.label || 'unknown'; // Default label
-                    const color = det.color ? `rgb(${det.color[0]}, ${det.color[1]}, ${det.color[2]})` : 'red'; // Default color
+                    const label = det.label || 'unknown';
+                    const color = det.color ? `rgb(${det.color[0]}, ${det.color[1]}, ${det.color[2]})` : 'red';
 
-                    // Scale coordinates
                     const canvasX1 = x1 * scaleX;
                     const canvasY1 = y1 * scaleY;
                     const canvasW = (x2 - x1) * scaleX;
                     const canvasH = (y2 - y1) * scaleY;
 
-                    // Draw bounding box
                     ctx.strokeStyle = color;
                     ctx.lineWidth = 2;
                     ctx.strokeRect(canvasX1, canvasY1, canvasW, canvasH);
 
-                    // Draw label background
                     ctx.fillStyle = color;
-                    const text = `${label} (ID: ${det.track_id || 'unknown'})`; // Add object ID next to the label
-                    ctx.font = '12px Arial'; // Set font before measuring text
+                    const text = `${label} (ID: ${det.track_id || 'unknown'})`;
+                    ctx.font = '12px Arial';
                     const textMetrics = ctx.measureText(text);
-                    const textHeight = 12; // Approximate height based on font size
+                    const textHeight = 12;
                     ctx.fillRect(canvasX1, canvasY1 - textHeight - 4, textMetrics.width + 4, textHeight + 4);
 
-                    // Draw label text
                     ctx.fillStyle = 'white';
                     ctx.fillText(text, canvasX1 + 2, canvasY1 - 4);
                 });
-
-                // --- Draw Track History ---
-                const trackHistory = data.track_history;
-                if (trackHistory) {
-                    Object.keys(trackHistory).forEach(trackId => {
-                        const points = trackHistory[trackId];
-                        if (points && points.length > 1) {
-                            // Find the color associated with this track ID from current detections
-                            // This assumes the track ID is present in the current detections
-                            // If not, we might need a fallback color generation
-                            const currentDet = data.detections.find(d => d.track_id == trackId);
-                            const trackColor = currentDet && currentDet.color ? `rgb(${currentDet.color[0]}, ${currentDet.color[1]}, ${currentDet.color[2]})` : `hsl(${trackId * 40 % 360}, 100%, 50%)`; // Fallback color based on ID
-
-                            ctx.strokeStyle = trackColor;
-                            ctx.lineWidth = 2;
-                            ctx.beginPath();
-
-                            // Scale and move to the first point
-                            const firstPoint = points[0];
-                            ctx.moveTo(firstPoint[0] * scaleX, firstPoint[1] * scaleY);
-
-                            // Draw lines to subsequent points
-                            for (let i = 1; i < points.length; i++) {
-                                const point = points[i];
-                                ctx.lineTo(point[0] * scaleX, point[1] * scaleY);
-                            }
-                            ctx.stroke(); // Render the path
-                        }
-                    });
-                }
-                // --- End Draw Track History ---
-
             } catch (error) {
                 console.error('Error fetching or drawing detections:', error);
-                // Optionally clear canvas on error
-                // ctx.clearRect(0, 0, canvas.width, canvas.height);
             }
         }
 
@@ -379,6 +377,51 @@
         // Call this function when the page loads and periodically
         updateTrackedObjectsList();
         setInterval(updateTrackedObjectsList, 1000); // Update every 2 seconds
+
+        const toggleTrackingBtn = document.getElementById('toggleTrackingBtn');
+        const trackingStatusSpan = document.getElementById('trackingStatus');
+
+        async function fetchTrackingStatus() {
+            try {
+                const response = await fetch('/api/tracking_status');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                updateTrackingButtonStatus(data.tracking_enabled);
+            } catch (error) {
+                console.error('Error fetching tracking status:', error);
+                trackingStatusSpan.textContent = 'Status: Error';
+            }
+        }
+
+        function updateTrackingButtonStatus(isEnabled) {
+            if (isEnabled) {
+                trackingStatusSpan.textContent = 'Status: Enabled';
+                toggleTrackingBtn.textContent = 'Disable Tracking';
+            } else {
+                trackingStatusSpan.textContent = 'Status: Disabled';
+                toggleTrackingBtn.textContent = 'Enable Tracking';
+            }
+        }
+
+        toggleTrackingBtn.addEventListener('click', async () => {
+            try {
+                trackingStatusSpan.textContent = 'Status: Toggling...';
+                const response = await fetch('/api/toggle_tracking', { method: 'POST' });
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                updateTrackingButtonStatus(data.tracking_enabled);
+            } catch (error) {
+                console.error('Error toggling tracking:', error);
+                trackingStatusSpan.textContent = 'Status: Error';
+            }
+        });
+
+        // Fetch initial status on page load
+        fetchTrackingStatus();
     </script>
 </body>
 </html>

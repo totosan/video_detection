@@ -323,6 +323,48 @@ def raw_snapshot():
     logger.debug(f"Raw snapshot: Returning JPEG image from {source_to_open}.")
     return Response(buf.tobytes(), mimetype='image/jpeg')
 
+# Add API endpoints in app.py
+@app.route('/api/toggle_tracking', methods=['POST'])
+def toggle_tracking():
+    """API to toggle tracking and bounding box drawing."""
+    try:
+        new_status = detection_system.toggle_tracking_and_bounding_boxes()
+        return jsonify({"tracking_enabled": new_status})
+    except Exception as e:
+        logger.exception("API: Error toggling tracking and bounding boxes")
+        return jsonify({"error": "Failed to toggle tracking and bounding boxes"}), 500
+
+@app.route('/api/tracking_status', methods=['GET'])
+def tracking_status():
+    """API to get the current status of tracking and bounding box drawing."""
+    try:
+        status = detection_system.is_tracking_and_bounding_boxes_enabled()
+        return jsonify({"tracking_enabled": status})
+    except Exception as e:
+        logger.exception("API: Error getting tracking status")
+        return jsonify({"error": "Failed to get tracking status"}), 500
+
+@app.route('/api/set_object_filter', methods=['POST'])
+def set_object_filter():
+    """API to set the object filter for displaying specific labels."""
+    try:
+        filter_data = request.json.get('object_filter', None)
+        detection_system.set_object_filter(filter_data)
+        return jsonify({"object_filter": filter_data})
+    except Exception as e:
+        logger.exception("API: Error setting object filter")
+        return jsonify({"error": "Failed to set object filter"}), 500
+
+@app.route('/api/get_object_filter', methods=['GET'])
+def get_object_filter():
+    """API to get the current object filter."""
+    try:
+        current_filter = detection_system.get_object_filter()
+        return jsonify({"object_filter": current_filter})
+    except Exception as e:
+        logger.exception("API: Error getting object filter")
+        return jsonify({"error": "Failed to get object filter"}), 500
+
 # --- Graceful Shutdown --- 
 def cleanup_on_exit():
     logger.info("Flask app exiting, stopping detection system...")
@@ -366,4 +408,5 @@ if __name__ == '__main__':
              logger.warning("Cleanup: Detection system still seems to be running, attempting stop again.")
              cleanup_on_exit()
         logger.info("Server shut down process completed.")
+
 
