@@ -7,6 +7,8 @@ using Microsoft.SemanticKernel;
 using System.Collections.Generic;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.Ollama;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Processing;
 
 #pragma warning disable SKEXP0070 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 namespace Frontend
@@ -84,8 +86,6 @@ namespace Frontend
             }
         }
 
-
-
         [KernelFunction, Description(@"Toggles the generation of annotated video frames on the backend server. Returns JSON: {""backend_annotation_enabled"": true/false} or {""error"": ""...""}")]
         public async Task<string> ToggleBackendAnnotationAsync()
         {
@@ -115,8 +115,18 @@ namespace Frontend
                 HttpResponseMessage response = await client.GetAsync(url);
                 response.EnsureSuccessStatusCode();
                 byte[] imageBytes = await response.Content.ReadAsByteArrayAsync();
-                string base64Image = Convert.ToBase64String(imageBytes);
+                using var image = Image.Load(imageBytes);
+                int width = image.Width;
+                int height = image.Height;
+                double scale = 0.5; // reduce to half size
+                int newWidth = (int)(width * scale);
+                int newHeight = (int)(height * scale);
 
+                image.Mutate(ctx => ctx.Resize(newWidth, newHeight));
+                using var msResized = new MemoryStream();
+                image.SaveAsJpeg(msResized);
+                var base64Image = Convert.ToBase64String(msResized.ToArray());
+                
                 // build the cahtcompletionmessage for a vision model
                 var userMessage = new ChatMessageContentItemCollection
                 {
@@ -151,6 +161,43 @@ namespace Frontend
             catch (Exception e)
             {
                 return JsonSerializer.Serialize(new { status = "error", message = $"Unexpected error: {e.Message}" });
+            }
+        }
+
+        [KernelFunction, Description(@"To highlight objects in the video stream, this function sets the object filter on the backend server. ")]
+        public async Task<string> SetObjectFilterAsync(string filterJson)
+        {
+            string url = $"{FlaskApiBaseUrl}/set_object_filter";
+            try
+            {
+                var content = new StringContent(filterJson, System.Text.Encoding.UTF8, "application/json");
+                return await PostApiResponseAsync(url, content); // app.py handles the filter setting
+            }
+            catch (HttpRequestException e)
+            {
+                return JsonSerializer.Serialize(new { error = $"API request failed: {e.Message}" });
+            }
+            catch (Exception e)
+            {
+                return JsonSerializer.Serialize(new { error = $"Unexpected error: {e.Message}" });
+            }
+        }
+
+        [KernelFunction, Description(@" Getting the active object filter from the backend server. Returns JSON: {""filter"": {...}} or {""error"": ""...""}")]
+        public async Task<string> GetObjectFilterAsync()
+        {
+            string url = $"{FlaskApiBaseUrl}/get_object_filter";
+            try
+            {
+                return await GetApiResponseAsync(url); // app.py returns the current filter
+            }
+            catch (HttpRequestException e)
+            {
+                return JsonSerializer.Serialize(new { error = $"API request failed: {e.Message}" });
+            }
+            catch (Exception e)
+            {
+                return JsonSerializer.Serialize(new { error = $"Unexpected error: {e.Message}" });
             }
         }
     }

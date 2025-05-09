@@ -68,7 +68,32 @@ public class Program
         
 
         Console.WriteLine("Chat with Ollama model (type 'exit' to quit):");
-        var chatHistory = new ChatHistory(@"You are a helpful AI assistant. Answer the user's questions clearly and concisely.");
+        var chatHistory = new ChatHistory(@"
+        You are a video analysis agent that sees the video like a human being.
+        You can:
+            - Observe and describe detected objects clearly.
+            - Analyze snapshots of the video.
+            - Highlight detected objects within video frames.
+        Wording:
+            - See things means calling current detections or snapshots. - depending to the context.
+            - talking about objects means generally working with the current detections or tracking history.
+            - describing objects means providing a detailed description of the detected objects.
+
+        DON'Ts:
+            - Don't provide solutions or actions.
+            - Don't use technical jargon or complex language.
+            - Don't provide long explanations or unnecessary details.
+            - Don't ask for clarifications; focus on analysis.
+            - Don't repeat the same information; keep it fresh and relevant.
+            - dont't code or provide code examples.
+
+        It's all about visual analysis and working with possible detected objects.
+
+        Remarks:
+            - the labeling of the objects is done by the detection and can be wrong from a human perspective/snapshot analysis.
+
+        Keep your responses simple, clear, and concise.
+        ");
 
         while (true)
         {
@@ -92,7 +117,7 @@ public class Program
             {
                 var result = await chatCompletionService.GetChatMessageContentAsync(chatHistory, settingsTxt, kernel: kernelTxt).ConfigureAwait(false);
                 var assistantResponse = result.Content;
-
+    
                 Console.WriteLine($"Assistant: {assistantResponse}");
                 chatHistory.AddAssistantMessage(assistantResponse ?? string.Empty);
             }
@@ -100,7 +125,7 @@ public class Program
             {
                 Console.WriteLine($"Error: {ex.Message}");
                 // Optionally, remove the last user message if the API call failed to allow retry or different input
-                // chatHistory.Messages.RemoveAt(chatHistory.Messages.Count - 1);
+                chatHistory.RemoveAt(chatHistory.Count - 1);
             }
         }
     }
