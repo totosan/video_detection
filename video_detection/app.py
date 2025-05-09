@@ -10,6 +10,7 @@ import logging # Import logging
 import atexit # To ensure cleanup on exit
 import collections # Import collections for deque type checking
 import base64 # Import base64 for image encoding
+import signal
 
 # Import static config and the new system manager
 from config import STATIC_FOLDER, TEMPLATE_FOLDER, RTSP_STREAM_URL # Only import static config
@@ -21,6 +22,10 @@ os.makedirs(STATIC_FOLDER, exist_ok=True)
 
 # Get logger
 logger = logging.getLogger(__name__) # Use module name for logger
+
+# Ensure all loggers respect the global logging level
+for logger_name in logging.root.manager.loggerDict:
+    logging.getLogger(logger_name).setLevel(logging.INFO)
 
 # --- Instantiate the Detection System ---
 try:
@@ -326,6 +331,16 @@ def cleanup_on_exit():
 
 atexit.register(cleanup_on_exit)
 # -------------------------
+
+def handle_exit_signal(signum, frame):
+    logger.info("Exit signal received. Stopping the application...")
+    detection_system.stop()
+    logger.info("Detection system stopped. Exiting application.")
+    sys.exit(0)
+
+# Register signal handlers for clean shutdown
+signal.signal(signal.SIGINT, handle_exit_signal)
+signal.signal(signal.SIGTERM, handle_exit_signal)
 
 if __name__ == '__main__':
     try:

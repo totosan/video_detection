@@ -46,13 +46,25 @@ class AnnotationWorker:
                             cv2.line(annotated, pts[i-1], pts[i], color, 2)
                 # Draw detection boxes and labels
                 for det in current_detections:
-                    x1, y1, x2, y2 = det['box']
-                    label = det['label']
-                    color = det['color']
-                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-                    (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                    cv2.rectangle(annotated, (x1, y1 - h - 4), (x1 + w, y1), color, -1)
-                    cv2.putText(annotated, label, (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    try:
+                        # Ensure det['box'] is in the expected format and all values are ints
+                        if isinstance(det['box'], (list, tuple)) and len(det['box']) == 4:
+                            x1, y1, x2, y2 = map(int, det['box'])
+                        elif hasattr(det['box'], 'tolist'):
+                            x1, y1, x2, y2 = map(int, det['box'].tolist())
+                        else:
+                            logger.warning(f"Unexpected format for det['box']: {type(det['box'])}")
+                            continue
+
+                        label = det['label']
+                        # Ensure color is a tuple of ints
+                        color = tuple(int(c) for c in det['color']) if 'color' in det and det['color'] is not None else (0, 255, 0)
+                        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                        cv2.rectangle(annotated, (x1, y1 - h - 4), (x1 + w, y1), color, -1)
+                        cv2.putText(annotated, label, (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    except Exception as e:
+                        logger.exception(f"Error processing detection box: {e}")
                 self.annotated_frame_callback(annotated)
             except Exception:
                 logger.exception("Exception in AnnotationWorker during annotation")

@@ -84,7 +84,7 @@ class DetectionWorker:
                 # Mark the frame as processed
                 self.frame_queue.task_done()
             except Exception as e:
-                logger.exception(f"Error processing frame: {e}")
+                logger.exception(f"Error processing frame {frame_count}: {e}")
                 # Still mark as done to avoid blocking
                 try:
                     self.frame_queue.task_done()

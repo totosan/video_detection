@@ -147,7 +147,9 @@ class DetectionSystem:
 
             # Add detailed debugging for detection_images
             if detection_images is None:
-                logger.warning("detection_images parameter is None")  # Fixed missing closing quote
+                if not hasattr(self, '_detection_images_warning_logged'):
+                    logger.warning("detection_images parameter is None")
+                    self._detection_images_warning_logged = True
             elif not isinstance(detection_images, dict):
                 logger.warning(f"detection_images is not a dictionary: {type(detection_images)}")
             elif not detection_images:
@@ -307,17 +309,8 @@ class DetectionSystem:
         logger.info("Starting DetectionSystem threads...")
         self.stop_event.clear()
 
-        # Clear queues and reset state
-        while not self.frame_queue.empty():
-            try: self.frame_queue.get_nowait()
-            except queue.Empty: break
-        while not self.annotation_queue.empty():
-            try: self.annotation_queue.get_nowait()
-            except queue.Empty: break
-        self.latest_frame = None
-        self.latest_annotated_frame = None
-        self.latest_detections_data = {"results": None, "frame_shape": None, "track_history": {}, "tracked_objects_info": {}}
-        # tracked data cleared via resetting latest_detections_data instead of deques
+        # Clear queues and reset state asynchronously
+        threading.Thread(target=self._clear_queues_and_reset_state, daemon=True).start()
 
         # Instantiate workers, passing necessary dependencies and callbacks
         self.frame_grabber = FrameGrabber(
@@ -346,12 +339,35 @@ class DetectionSystem:
             is_backend_annotation_enabled_func=self.is_backend_annotation_enabled # Pass the getter method
         )
 
-        # Start threads
+        # Start threads asynchronously
+        threading.Thread(target=self._start_workers, daemon=True).start()
+
+    def _clear_queues_and_reset_state(self):
+        # Clear queues and reset state
+        while not self.frame_queue.empty():
+            try: self.frame_queue.get_nowait()
+            except queue.Empty: break
+        while not self.annotation_queue.empty():
+            try: self.annotation_queue.get_nowait()
+            except queue.Empty: break
+        self.latest_frame = None
+        self.latest_annotated_frame = None
+        self.latest_detections_data = {"results": None, "frame_shape": None, "track_history": {}, "tracked_objects_info": {}}
+
+    def _start_workers(self):
+        logger.info("Starting FrameGrabber thread...")
         self.frame_grabber.start()
         time.sleep(0.1)
+        logger.info("FrameGrabber thread started.")
+
+        logger.info("Starting ObjectDetector thread...")
         self.object_detector.start()
         time.sleep(0.1)
+        logger.info("ObjectDetector thread started.")
+
+        logger.info("Starting AnnotationWorker thread...")
         self.annotation_worker.start()
+        logger.info("AnnotationWorker thread started.")
 
         if self.frame_grabber.is_alive() and self.object_detector.is_alive() and self.annotation_worker.is_alive():
             logger.info("DetectionSystem threads started successfully.")

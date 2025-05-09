@@ -66,7 +66,7 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"Retrieves the latest raw detection results (bounding boxes, confidences, classes). Returns JSON: {""detections"": [...]} or {""error"": ""...""}")]
+        [KernelFunction, Description(@"Requests the current objects, detected by the backend server. Returns JSON: {""detections"": [...]} or {""error"": ""...""}")]
         public async Task<string> GetCurrentDetectionsAsync()
         {
             string url = $"{FlaskApiBaseUrl}/current_detections";
@@ -105,22 +105,23 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"Requests a snapshot of the latest processed frame as a base64 encoded string. Returns JSON: {""status"": ""success"", ""image_base64"": ""...""} or {""status"": ""error"", ""message"": ""...""}")]
-        public async Task<string> GetSnapshotAsync()
+        [KernelFunction, Description(@"With this function one can see, what in a picure is detected. Furthermore it enables rich and detailed analysis of the image.")]
+        public async Task<string> GetRawSnapshotAsync()
         {
-
-            string url = $"{FlaskAppBaseUrl}/snapshot"; // Uses the app base URL
+            Console.WriteLine("Getting current snapshot");
+            string url = $"{FlaskAppBaseUrl}/raw_snapshot"; // Uses the app base URL
             try
             {
                 HttpResponseMessage response = await client.GetAsync(url);
                 response.EnsureSuccessStatusCode();
                 byte[] imageBytes = await response.Content.ReadAsByteArrayAsync();
                 string base64Image = Convert.ToBase64String(imageBytes);
+
                 // build the cahtcompletionmessage for a vision model
                 var userMessage = new ChatMessageContentItemCollection
                 {
                   new TextContent("""
-                  Task: as a vision model, please describe the image in detail.
+                  Task: as a vision model, please describe the image. pin point the main objects in the image and their position.
                   
                   Rules:
                   - Provide a detailed description of the image.
@@ -152,28 +153,6 @@ namespace Frontend
                 return JsonSerializer.Serialize(new { status = "error", message = $"Unexpected error: {e.Message}" });
             }
         }
-
-        // [KernelFunction, Description(@"Requests a raw snapshot directly from the RTSP stream as a base64 encoded string. Returns JSON: {""status"": ""success"", ""image_base64"": ""...""} or {""status"": ""error"", ""message"": ""...""}")]
-        // public async Task<string> GetRawSnapshotAsync()
-        // {
-        //     string url = $"{FlaskAppBaseUrl}/raw_snapshot"; // Uses the app base URL
-        //     try
-        //     {
-        //         HttpResponseMessage response = await client.GetAsync(url);
-        //         response.EnsureSuccessStatusCode();
-        //         byte[] imageBytes = await response.Content.ReadAsByteArrayAsync();
-        //         string base64Image = Convert.ToBase64String(imageBytes);
-        //         return JsonSerializer.Serialize(new { status = "success", image_base64 = base64Image });
-        //     }
-        //     catch (HttpRequestException e)
-        //     {
-        //         return JsonSerializer.Serialize(new { status = "error", message = $"API request failed: {e.Message}" });
-        //     }
-        //     catch (Exception e)
-        //     {
-        //         return JsonSerializer.Serialize(new { status = "error", message = $"Unexpected error: {e.Message}" });
-        //     }
-        // }
     }
 }
 

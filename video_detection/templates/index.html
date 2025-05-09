@@ -107,11 +107,11 @@
                 });
         }
 
-        // Update the list every 2 seconds
-        setInterval(updateTrackedObjects, 2000);
+        // Update the list every 2 seconds - obsolete
+        // setInterval(updateTrackedObjects, 2000);
 
-        // Initial load
-        updateTrackedObjects();
+        // obsoltete
+        // updateTrackedObjects(); // Uncommenting this line to call the function
 
         // --- Debug Rendering Toggle ---
         const toggleBtn = document.getElementById('toggleDebugRenderingBtn');
@@ -250,7 +250,7 @@
 
                     // Draw label background
                     ctx.fillStyle = color;
-                    const text = `${label}`; // Add confidence later if available
+                    const text = `${label} (ID: ${det.track_id || 'unknown'})`; // Add object ID next to the label
                     ctx.font = '12px Arial'; // Set font before measuring text
                     const textMetrics = ctx.measureText(text);
                     const textHeight = 12; // Approximate height based on font size
@@ -337,9 +337,20 @@
                         return;
                     }
 
-                    data.forEach(obj => {
+                    // Sort objects by time_since_seen (latest to oldest)
+                    data.sort((a, b) => a.time_since_seen - b.time_since_seen);
+
+                    // Limit the list to the 5 most recent objects
+                    const limitedData = data.slice(0, 5);
+
+                    limitedData.forEach(obj => {
                         const listItem = document.createElement('li');
                         listItem.className = 'list-group-item';
+
+                        // Highlight current detections (seen within 3 seconds)
+                        if (obj.time_since_seen < 3.0) {
+                            listItem.classList.add('recent');
+                        }
 
                         // Add thumbnail if available
                         if (obj.detection_image) {
@@ -354,7 +365,7 @@
                         }
 
                         // Add object details
-                        const text = document.createTextNode(`ID: ${obj.id}, Name: ${obj.name}`);
+                        const text = document.createTextNode(`ID: ${obj.id}, Name: ${obj.name}, Seen: ${obj.time_since_seen}s ago`);
                         listItem.appendChild(text);
 
                         trackedObjectsList.appendChild(listItem);
@@ -367,7 +378,7 @@
 
         // Call this function when the page loads and periodically
         updateTrackedObjectsList();
-        setInterval(updateTrackedObjectsList, 2000); // Update every 2 seconds
+        setInterval(updateTrackedObjectsList, 1000); // Update every 2 seconds
     </script>
 </body>
 </html>

@@ -65,7 +65,7 @@ class ObjectDetector:
 
                 # --- Skip Frame Logic ---
                 if FRAME_SKIP_FACTOR > 1 and frame_counter % FRAME_SKIP_FACTOR != 1:
-                    # Skip processing this frame, but mark task as done
+                    logger.debug(f"Skipping frame {frame_counter} due to FRAME_SKIP_FACTOR.")
                     self.frame_queue.task_done()
                     continue  # Skip to the next frame
                 # ------------------------
@@ -76,11 +76,31 @@ class ObjectDetector:
                         frame, track_history, tracked_objects_info
                     )
 
-                    # Enqueue raw detection data and frame for annotation
-                    if results is not None:
+                    # --- Convert results to serializable detections for annotation ---
+                    serializable_detections = []
+                    if results and hasattr(results[0], 'boxes') and results[0].boxes is not None:
+                        boxes = results[0].boxes.xyxy.cpu().numpy()
+                        confs = results[0].boxes.conf.cpu().numpy()
+                        clss = results[0].boxes.cls.cpu().numpy()
+                        track_ids = results[0].boxes.id.cpu().numpy() if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None else [None]*len(boxes)
+                        for i in range(len(boxes)):
+                            box = [int(x) for x in boxes[i]]
+                            cls_idx = int(clss[i])
+                            label = self.model.names[cls_idx] if cls_idx < len(self.model.names) else 'unknown'
+                            color = ((track_ids[i] * 50) % 255, (track_ids[i] * 80) % 255, (track_ids[i] * 120) % 255) if track_ids[i] is not None else (255,0,0)
+                            serializable_detections.append({
+                                'box': box,
+                                'label': label,
+                                'color': color,
+                                'track_id': int(track_ids[i]) if track_ids[i] is not None else None
+                            })
+                    # -------------------------------------------------------------
+
+                    # Enqueue serializable detection data and frame for annotation
+                    if serializable_detections:
                         try:
                             self.annotation_queue.put_nowait((
-                                results,
+                                serializable_detections,
                                 frame_shape,
                                 track_history,
                                 tracked_objects_info,
@@ -97,7 +117,9 @@ class ObjectDetector:
                         tracked_objects_info
                     )
                 except Exception as e:
-                    logger.exception(f"Error processing frame: {e}")
+                    logger.exception(f"Error processing frame {frame_counter}: {e}")
+                    # Invoke callback with default data to avoid blocking
+                    self.results_update_callback(None, None, {}, {})
 
                 # Mark the task from frame_queue as done
                 self.frame_queue.task_done()

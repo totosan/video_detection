@@ -31,4 +31,8 @@ LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
 logger = logging.getLogger(__name__) # Get logger for config module
 
+# Ensure all loggers inherit the global logging level
+for logger_name in logging.root.manager.loggerDict:
+    logging.getLogger(logger_name).setLevel(LOG_LEVEL)
+
 logger.info("Static configuration loaded.")
