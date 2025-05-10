@@ -122,6 +122,20 @@ def api_tracked_objects():
     return jsonify(objects_list)
 
 # --- New API Endpoint for Current Detections ---
+@app.route('/api/current_detections_light')
+def api_current_detections_light():
+    """API endpoint to get the latest raw detection results for client-side drawing."""
+    try:
+        data = detection_system.get_current_detections_data()
+        # Ensure detections is always a list, even if None initially
+        if data.get('detections') is None:
+            data['detections'] = []
+
+        return jsonify(data['detections'])  # Now contains JSON-serializable data and detection images
+    except Exception as e:
+        logger.exception("API: Error getting or serializing current detections data")
+        return jsonify({"error": "Failed to get current detections data"}), 500
+
 @app.route('/api/current_detections')
 def api_current_detections():
     """API endpoint to get the latest raw detection results for client-side drawing."""
@@ -348,6 +362,7 @@ def tracking_status():
 def set_object_filter():
     """API to set the object filter for displaying specific labels."""
     try:
+        print(f"Request data: {request.json}")  # Debugging line
         filter_data = request.json.get('object_filter', None)
         detection_system.set_object_filter(filter_data)
         return jsonify({"object_filter": filter_data})

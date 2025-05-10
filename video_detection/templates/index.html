@@ -139,7 +139,7 @@
                 updateButtonStatus(data.backend_annotation_enabled);
 
                 // Show or hide the debug rendering feed based on the status
-                if (data.backend_annotation_enabled) {
+               if (data.backend_annotation_enabled) {
                     debugRenderingContainer.classList.remove('hidden');
                 } else {
                     debugRenderingContainer.classList.add('hidden');
@@ -202,6 +202,24 @@
         const objectFilterInput = document.getElementById('objectFilterInput');
         const setObjectFilterBtn = document.getElementById('setObjectFilterBtn');
 
+        async function fetchObjectFilter() {
+            try {
+                const response = await fetch('/api/get_object_filter');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                if (data.object_filter) {
+                    objectFilterInput.value = data.object_filter.join(',');
+                } else {
+                    objectFilterInput.value = ''; // Clear if filter is null or empty
+                }
+                console.log('Current object filter:', data.object_filter);
+            } catch (error) {
+                console.error('Error fetching object filter:', error);
+            }
+        }
+
         async function setObjectFilter() {
             const filterValue = objectFilterInput.value.split(',').map(item => item.trim()).filter(item => item);
             try {
@@ -215,6 +233,7 @@
                 }
                 const data = await response.json();
                 console.log('Object filter set to:', data.object_filter);
+                fetchObjectFilter(); // Refresh the displayed filter
             } catch (error) {
                 console.error('Error setting object filter:', error);
             }
@@ -315,6 +334,11 @@
 
         // Start the drawing loop
         setInterval(fetchAndDrawDetections, 100); // Fetch and draw every 100ms
+
+        // Fetch initial object filter on page load
+        fetchObjectFilter();
+        // Periodically refresh the object filter display
+        setInterval(fetchObjectFilter, 5000); // Refresh every 5 seconds
 
         // Initial call to size canvas (in case image loads before JS runs fully)
         // resizeCanvas(); // resizeCanvas is called on load or if already complete

@@ -9,6 +9,7 @@ using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.Ollama;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
+using Microsoft.VisualBasic;
 
 #pragma warning disable SKEXP0070 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 namespace Frontend
@@ -68,13 +69,14 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"Requests the current objects, detected by the backend server. Returns JSON: {""detections"": [...]} or {""error"": ""...""}")]
+        [KernelFunction, Description(@"Requests the current objects, that one can see in a scene. Returns JSON: {""detections"": [...]} or {""error"": ""...""}")]
         public async Task<string> GetCurrentDetectionsAsync()
         {
-            string url = $"{FlaskApiBaseUrl}/current_detections";
+            string url = $"{FlaskApiBaseUrl}/current_detections_light";
             try
             {
-                return await GetApiResponseAsync(url); // app.py returns {"detections": [...]} or {"error": "..."}
+                var result = await GetApiResponseAsync(url); // app.py returns {"detections": [...]} or {"error": "..."}
+                return result;
             }
             catch (HttpRequestException e)
             {
@@ -105,7 +107,7 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"With this function one can see, what in a picure is detected. Furthermore it enables rich and detailed analysis of the image.")]
+        [KernelFunction, Description(@"With this function can get the whole picture of the scene. Furthermore it enables rich and detailed analysis of the image.")]
         public async Task<string> GetRawSnapshotAsync()
         {
             Console.WriteLine("Getting current snapshot");
@@ -118,7 +120,7 @@ namespace Frontend
                 using var image = Image.Load(imageBytes);
                 int width = image.Width;
                 int height = image.Height;
-                double scale = 0.5; // reduce to half size
+                double scale = 0.75; // reduce to half size
                 int newWidth = (int)(width * scale);
                 int newHeight = (int)(height * scale);
 
@@ -126,7 +128,15 @@ namespace Frontend
                 using var msResized = new MemoryStream();
                 image.SaveAsJpeg(msResized);
                 var base64Image = Convert.ToBase64String(msResized.ToArray());
-                
+               
+
+                // Save resized image to disk
+                var outputDir = Path.Combine(Directory.GetCurrentDirectory(), "Snapshots");
+                Directory.CreateDirectory(outputDir);
+                var fileName = $"snapshot_{DateTime.UtcNow:yyyyMMdd_HHmmss}.jpg";
+                var filePath = Path.Combine(outputDir, fileName);
+                await File.WriteAllBytesAsync(filePath, msResized.ToArray());
+
                 // build the cahtcompletionmessage for a vision model
                 var userMessage = new ChatMessageContentItemCollection
                 {
@@ -164,13 +174,19 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"To highlight objects in the video stream, this function sets the object filter on the backend server. ")]
-        public async Task<string> SetObjectFilterAsync(string filterJson)
+        [KernelFunction, Description(@"To highlight objects in the video stream, this function sets the object filter in the format: label1, label2, ... ")]
+        public async Task<string> SetObjectFilterAsync(string objectLabels)
         {
             string url = $"{FlaskApiBaseUrl}/set_object_filter";
             try
             {
-                var content = new StringContent(filterJson, System.Text.Encoding.UTF8, "application/json");
+                var labels = objectLabels
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                var payload = new { object_filter = labels };
+                var content = new StringContent(
+                    JsonSerializer.Serialize(payload),
+                    System.Text.Encoding.UTF8,
+                    "application/json");
                 return await PostApiResponseAsync(url, content); // app.py handles the filter setting
             }
             catch (HttpRequestException e)

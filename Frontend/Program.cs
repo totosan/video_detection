@@ -21,7 +21,7 @@ public class Program
     {
         // Configure these to your Ollama setup
         var ollamaMode_text_lId = "llama3.2"; // Or your preferred model, e.g., "mistral", "phi3"
-        var ollamaMode_vision_lId = "gemma3:4b-it-qat"; // Or your preferred model, e.g., "mistral", "phi3"
+        var ollamaMode_vision_lId = "gemma3:4b";//-it-qat"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaBaseUrl = new Uri("http://localhost:11434"); // Default Ollama API endpoint
 
         var builder = Kernel.CreateBuilder();
@@ -68,32 +68,16 @@ public class Program
         
 
         Console.WriteLine("Chat with Ollama model (type 'exit' to quit):");
-        var chatHistory = new ChatHistory(@"
-        You are a video analysis agent that sees the video like a human being.
-        You can:
-            - Observe and describe detected objects clearly.
-            - Analyze snapshots of the video.
-            - Highlight detected objects within video frames.
-        Wording:
-            - See things means calling current detections or snapshots. - depending to the context.
-            - talking about objects means generally working with the current detections or tracking history.
-            - describing objects means providing a detailed description of the detected objects.
-
-        DON'Ts:
-            - Don't provide solutions or actions.
-            - Don't use technical jargon or complex language.
-            - Don't provide long explanations or unnecessary details.
-            - Don't ask for clarifications; focus on analysis.
-            - Don't repeat the same information; keep it fresh and relevant.
-            - dont't code or provide code examples.
-
-        It's all about visual analysis and working with possible detected objects.
-
-        Remarks:
-            - the labeling of the objects is done by the detection and can be wrong from a human perspective/snapshot analysis.
-
-        Keep your responses simple, clear, and concise.
-        ");
+        var chatHistory = new ChatHistory("""
+        You are an assistant that can help the user with video analysis.
+        You are able to detect objects in a video stream and provide a detailed description of the visual data. 
+        You are also able to analyze the request from the user and identify the intent of the user. 
+        You are able to decide which agent should act next. You are able to get current detections of objects in a video stream, get the current systems state, and get snapshots of the video stream.
+        DON'T provide solutions; focus only on answering the question in a human way.
+        DON'T provide any code or technical details.
+        DON'T provide any explanations or extra text.
+        DO NOT ask for clarifications.
+        """);
 
         while (true)
         {

@@ -6,3 +6,5 @@ core
 *.engine
 *.onnx
 .*env
+*.jpeg
+*.jpg
