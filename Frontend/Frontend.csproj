@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="DotNetEnv" Version="3.1.1" />
     <PackageReference Include="microsoft.semantickernel" Version="1.48.0" />
     <PackageReference Include="Microsoft.SemanticKernel.Agents.abstractions" Version="1.48.0" />
     <PackageReference Include="Microsoft.SemanticKernel.Agents.Core" Version="1.48.0" />

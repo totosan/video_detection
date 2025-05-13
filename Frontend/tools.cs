@@ -107,7 +107,7 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"With this function can get the whole picture of the scene. Furthermore it enables rich and detailed analysis of the image.")]
+        [KernelFunction, Description(@"With this function you can get the whole picture of the scene. Furthermore it enables rich and detailed analysis of the image.")]
         public async Task<string> GetRawSnapshotAsync()
         {
             Console.WriteLine("Getting current snapshot");

@@ -8,9 +8,11 @@ using Microsoft.SemanticKernel.Agents;
 using Microsoft.SemanticKernel.Agents.Chat;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.Ollama; // Provides AddOllamaChatCompletion extension
+using Microsoft.SemanticKernel.Connectors.OpenAI; // Provides AddOpenAIChatCompletion extension
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol.Transport;
 using ModelContextProtocol.Protocol.Types;
+using DotNetEnv; // Added for .env file support
 
 #pragma warning disable SKEXP0070 // Acknowledge experimental status of Ollama connector
 #pragma warning disable SKEXP0110 // Acknowledge experimental status of Ollama connector
@@ -19,10 +21,27 @@ public class Program
 {
     public static async Task Main(string[] args)
     {
+        // Load environment variables from .env file
+        Env.Load();
+
+        // Determine if running in online mode (using OpenAI)
+        bool useOpenAI = args.Contains("-online");
+
         // Configure these to your Ollama setup
         var ollamaMode_text_lId = "llama3.2"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaMode_vision_lId = "gemma3:4b";//-it-qat"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaBaseUrl = new Uri("http://localhost:11434"); // Default Ollama API endpoint
+
+        // Configure these for your OpenAI setup
+        var openAIModelId = "o4-mini"; // E.g., "gpt-4"
+        // Read API key from environment variable
+        var openAIApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+
+        if (useOpenAI && string.IsNullOrEmpty(openAIApiKey))
+        {
+            Console.WriteLine("OpenAI API key is not set. Please set the OPENAI_API_KEY environment variable in your .env file.");
+            return;
+        }
 
         var builder = Kernel.CreateBuilder();
 
@@ -38,6 +57,22 @@ public class Program
             endpoint: ollamaBaseUrl, // Pass the Uri object directly
             serviceId: "ollamaVis"      // Specify a service key for keyed retrieval
         );
+
+        // Add OpenAI Chat Completion only if using OpenAI and API key is present
+        if (useOpenAI)
+        {
+            if (string.IsNullOrEmpty(openAIApiKey))
+            {
+                Console.WriteLine("OpenAI API key is not set. Please set the OPENAI_API_KEY environment variable in your .env file or ensure the .env file is in the correct location (Frontend directory).");
+                return;
+            }
+            builder.AddOpenAIChatCompletion(
+                modelId: openAIModelId,
+                apiKey: openAIApiKey, // Use the key read from .env
+                serviceId: "openAI" // Specify a service key for keyed retrieval
+            );
+        }
+
         var cwd = Path.GetDirectoryName(Environment.ProcessPath);
         Console.WriteLine($"Current working directory: {cwd}");
         // Create an MCPClient for the GitHub server
@@ -57,17 +92,38 @@ public class Program
 
         var settingsTxt = new OllamaPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(), ServiceId = "ollamaTxt" };
         var settingsVis = new OllamaPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.None(), ServiceId = "ollamaVis" };
+        var settingsOpenAI = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(), ServiceId = "openAI" };
 
 
         // Retrieve the chat completion service
         var chatCompletionService = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaTxt");
         var chatCompletionServiceVis = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaVis");
+        var chatCompletionServiceOpenAI = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("openAI");
 
-        var pluginsObjectDetection = KernelPluginFactory.CreateFromObject(new Tools(chatCompletionServiceVis),"objectDetection");
-        kernelTxt.Plugins.Add(pluginsObjectDetection);        
-        
+        IChatCompletionService activeChatService;
+        KernelFunction? availableFunctions = null;
+        PromptExecutionSettings? activeSettings;
+        var pluginsObjectDetection = KernelPluginFactory.CreateFromObject(new Tools(chatCompletionServiceVis), "objectDetection");
+        kernelTxt.Plugins.Add(pluginsObjectDetection);
 
-        Console.WriteLine("Chat with Ollama model (type 'exit' to quit):");
+        if (useOpenAI)
+        {
+            Console.WriteLine("Using OpenAI API.");
+            activeChatService = chatCompletionServiceOpenAI;
+            activeSettings = settingsOpenAI;
+            // Note: OpenAI does not use the local 'objectDetection' plugin in this basic setup.
+            // You might need a different plugin or approach if you want OpenAI to call local tools.
+        }
+        else
+        {
+            Console.WriteLine("Using Ollama API.");
+            activeChatService = chatCompletionService;
+            activeSettings = settingsTxt;
+            // availableFunctions = pluginsObjectDetection; // This line seems incorrect, CreateFromObject returns a KernelPlugin
+        }
+
+
+        Console.WriteLine($"Chat with {(useOpenAI ? "OpenAI" : "Ollama")} model (type 'exit' to quit):");
         var chatHistory = new ChatHistory("""
         You are an assistant that can help the user with video analysis.
         You are able to detect objects in a video stream and provide a detailed description of the visual data. 
@@ -99,9 +155,13 @@ public class Program
 
             try
             {
-                var result = await chatCompletionService.GetChatMessageContentAsync(chatHistory, settingsTxt, kernel: kernelTxt).ConfigureAwait(false);
+                var result = await activeChatService.GetChatMessageContentAsync(
+                    chatHistory,
+                    activeSettings,
+                    kernel: kernelTxt 
+                ).ConfigureAwait(false);
                 var assistantResponse = result.Content;
-    
+
                 Console.WriteLine($"Assistant: {assistantResponse}");
                 chatHistory.AddAssistantMessage(assistantResponse ?? string.Empty);
             }
@@ -115,9 +175,9 @@ public class Program
     }
 
 
-private static KernelFunction ConfigureSelectionFunction(string? nameVisual, string? nameDetection) =>
-        AgentGroupChat.CreatePromptFunctionForStrategy(
-            $$$"""
+    private static KernelFunction ConfigureSelectionFunction(string? nameVisual, string? nameDetection) =>
+            AgentGroupChat.CreatePromptFunctionForStrategy(
+                $$$"""
                **Task:** Determine which agent should act next based on the last response. Respond with **only** the agent's name from the list below. Do not add any explanations or extra text.
 
                **Agents:**
@@ -136,8 +196,8 @@ private static KernelFunction ConfigureSelectionFunction(string? nameVisual, str
 
                {{$lastmessage}}
                """,
-            safeParameterNames: "lastmessage"
-        );
+                safeParameterNames: "lastmessage"
+            );
 
     private static KernelFunction ConfigureTerminationFunction() =>
         AgentGroupChat.CreatePromptFunctionForStrategy(
