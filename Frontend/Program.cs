@@ -86,8 +86,8 @@ public class Program
 
         var tools = await mcpClient.ListToolsAsync().ConfigureAwait(false);
 
-        var kernel = builder.Build();
-        var kernelTxt = kernel.Clone();
+        var kernel = builder.Build(); // Build the kernel AFTER all services have been added
+        //var kernelTxt = kernel.Clone(); // Cloning will be conditional or handled differently
         //var kernelVis = kernel.Clone();
 
         var settingsTxt = new OllamaPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(), ServiceId = "ollamaTxt" };
@@ -98,32 +98,40 @@ public class Program
         // Retrieve the chat completion service
         var chatCompletionService = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaTxt");
         var chatCompletionServiceVis = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaVis");
-        var chatCompletionServiceOpenAI = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("openAI");
+        IChatCompletionService? chatCompletionServiceOpenAI = null; // Initialize as nullable
+        if (useOpenAI && !string.IsNullOrEmpty(openAIApiKey)) // Only retrieve if it should have been added
+        {
+            chatCompletionServiceOpenAI = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("openAI");
+        }
+
+        // Create the plugin once, as it's used by both OpenAI and Ollama (Txt)
+        var pluginsObjectDetection = KernelPluginFactory.CreateFromObject(new Tools(chatCompletionServiceVis), "objectDetection");
 
         IChatCompletionService activeChatService;
-        KernelFunction? availableFunctions = null;
+        KernelFunction? availableFunctions = null; // This variable is unused, consider removing if not needed later
         PromptExecutionSettings? activeSettings;
-        var pluginsObjectDetection = KernelPluginFactory.CreateFromObject(new Tools(chatCompletionServiceVis), "objectDetection");
-        kernelTxt.Plugins.Add(pluginsObjectDetection);
+        Kernel activeKernel; 
 
-        if (useOpenAI)
+        if (useOpenAI && chatCompletionServiceOpenAI != null) // Check if OpenAI service was successfully retrieved
         {
-            Console.WriteLine("Using OpenAI API.");
+            Console.WriteLine("Using OpenAI API with function calling.");
             activeChatService = chatCompletionServiceOpenAI;
             activeSettings = settingsOpenAI;
-            // Note: OpenAI does not use the local 'objectDetection' plugin in this basic setup.
-            // You might need a different plugin or approach if you want OpenAI to call local tools.
+            kernel.Plugins.Add(pluginsObjectDetection); // Add plugins to the main kernel for OpenAI
+            activeKernel = kernel; 
         }
         else
         {
-            Console.WriteLine("Using Ollama API.");
+            Console.WriteLine("Using Ollama API (either -online not specified, API key missing, or OpenAI service retrieval failed) with function calling.");
             activeChatService = chatCompletionService;
             activeSettings = settingsTxt;
-            // availableFunctions = pluginsObjectDetection; // This line seems incorrect, CreateFromObject returns a KernelPlugin
+            var kernelTxt = kernel.Clone(); // Clone the kernel for Ollama-specific plugins
+            kernelTxt.Plugins.Add(pluginsObjectDetection); // Add plugins to the cloned kernel for Ollama Txt
+            activeKernel = kernelTxt; 
         }
 
 
-        Console.WriteLine($"Chat with {(useOpenAI ? "OpenAI" : "Ollama")} model (type 'exit' to quit):");
+        Console.WriteLine($"Chat with {(useOpenAI && chatCompletionServiceOpenAI != null ? "OpenAI" : "Ollama")} model (type 'exit' to quit):");
         var chatHistory = new ChatHistory("""
         You are an assistant that can help the user with video analysis.
         You are able to detect objects in a video stream and provide a detailed description of the visual data. 
@@ -158,7 +166,7 @@ public class Program
                 var result = await activeChatService.GetChatMessageContentAsync(
                     chatHistory,
                     activeSettings,
-                    kernel: kernelTxt 
+                    kernel: activeKernel // Use the correctly configured kernel
                 ).ConfigureAwait(false);
                 var assistantResponse = result.Content;
 

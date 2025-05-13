@@ -122,7 +122,7 @@ namespace Frontend
                 int height = image.Height;
                 double scale = 0.75; // reduce to half size
                 int newWidth = (int)(width * scale);
-                int newHeight = (int)(height * scale);
+                int newHeight = (int)(height * scale); 
 
                 image.Mutate(ctx => ctx.Resize(newWidth, newHeight));
                 using var msResized = new MemoryStream();
@@ -174,7 +174,7 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"To highlight objects in the video stream, this function sets the object filter in the format: label1, label2, ... ")]
+        [KernelFunction, Description(@"Highlight/ select objects. us as parameter teh name of the object. More objects are separated by a comma. ")]
         public async Task<string> SetObjectFilterAsync(string objectLabels)
         {
             string url = $"{FlaskApiBaseUrl}/set_object_filter";
