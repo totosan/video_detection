@@ -4,448 +4,53 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>YOLO Object Detection Stream</title>
-    <style>
-        body { font-family: sans-serif; margin: 20px; }
-        h1 { text-align: center; }
-        .stream-container { text-align: center; margin-bottom: 20px; }
-        img { max-width: 100%; height: auto; border: 1px solid #ccc; }
-        #tracked-objects { margin-top: 20px; border: 1px solid #eee; padding: 10px; }
-        #tracked-objects h2 { margin-top: 0; }
-        #tracked-objects ul { list-style: none; padding: 0; }
-        #tracked-objects li { margin-bottom: 5px; padding: 5px; border-radius: 3px; }
-        #tracked-objects li.recent { background-color: #e6ffe6; font-weight: bold; } /* Style for recently seen */
-        #tracked-objects li.stale { background-color: #f0f0f0; color: #666; } /* Style for older items */
-        .timestamp { font-size: 0.8em; color: #555; margin-left: 10px; }
-        .video-container {
-            position: relative; /* Needed for absolute positioning of canvas */
-            display: inline-block; /* Shrink wrap the container */
-            line-height: 0; /* Prevent extra space below image */
-        }
-        #detectionCanvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            pointer-events: none; /* Allow clicks to pass through to the video/image */
-        }
-        .controls { text-align: center; margin-bottom: 20px; }
-        button { padding: 8px 15px; font-size: 1em; cursor: pointer; }
-        /* Added for toggling visibility */
-        .hidden {
-            display: none;
-        }
-    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <h1>Live Object Detection Feed</h1>
+    <div class="page-container">
+        <h1>Live Object Detection Feed</h1>
 
-    <div class="controls">
-        <button id="toggleDebugRenderingBtn">Toggle Debug Rendering</button>
-        <span id="debugRenderingStatus">Status: Unknown</span>
-    </div>
+        <div class="control-panel">
+            <div class="controls">
+                <button id="toggleDebugRenderingBtn">Toggle Debug Rendering</button>
+            </div>
 
-    <div class="controls">
-        <button id="toggleTrackingBtn">Toggle Tracking</button>
-        <span id="trackingStatus">Status: Unknown</span>
-    </div>
+            <div class="controls">
+                <button id="toggleTrackingBtn">Toggle Tracking</button>
+                <span id="trackingStatus" class="status-label">Status: Unknown</span>
+            </div>
 
-    <div class="controls">
-        <label for="objectFilterInput">Object Filter (comma-separated):</label>
-        <input type="text" id="objectFilterInput" placeholder="e.g., car,person">
-        <button id="setObjectFilterBtn">Set Filter</button>
-    </div>
-
-    <div class="stream-container">
-        <h2>Raw Camera Feed with Client-Side Detections</h2>
-        <div class="video-container"> <!-- Add container div -->
-            <img id="videoFeed" src="{{ url_for('video_feed') }}" width="640" height="360" alt="Raw Video Feed">
-            <canvas id="detectionCanvas"></canvas> <!-- Add canvas overlay -->
+            <div class="controls">
+                <label for="objectFilterInput">Object Filter (comma-separated):</label>
+                <input type="text" id="objectFilterInput" placeholder="e.g., car,person">
+                <button id="setObjectFilterBtn">Set Filter</button>
+                <div style="margin-top: 5px;">Current Active Filter: <strong id="currentFilterStatusLabel">Loading...</strong></div>
+            </div>
         </div>
-    </div>
 
-    <div id="debugRenderingContainer" class="stream-container">
-        <h2>Debug Rendering View (Backend Processing)</h2>
-        <img src="{{ url_for('video_feed_annotated') }}" width="640" height="360" alt="Debug Rendering Feed">
-    </div>
+        <div class="video-streams-panel">
+            <div class="stream-container">
+                <h2>Raw Camera Feed with Client-Side Detections</h2>
+                <div class="video-container"> <!-- Add container div -->
+                    <img id="videoFeed" src="{{ url_for('video_feed') }}" width="640" height="360" alt="Raw Video Feed">
+                    <canvas id="detectionCanvas"></canvas> <!-- Add canvas overlay -->
+                </div>
+            </div>
 
-    <div id="tracked-objects">
-        <h2>Recently Tracked Objects</h2>
-        <ul id="tracked-objects-list">
-            <li>Loading...</li>
-        </ul>
-    </div>
+            <div id="debugRenderingContainer" class="stream-container hidden"> <!-- Start hidden, JS will show it -->
+                <h2>Debug Rendering View (Backend Processing)</h2>
+                <img src="{{ url_for('video_feed_annotated') }}" width="640" height="360" alt="Debug Rendering Feed">
+            </div>
+        </div>
 
-    <script>
-        function updateTrackedObjects() {
-            fetch('/api/tracked_objects')
-                .then(response => response.json())
-                .then(data => {
-                    const list = document.getElementById('tracked-objects-list');
-                    list.innerHTML = ''; // Clear current list
+        <div id="tracked-objects">
+            <h2>Recently Tracked Objects</h2>
+            <ul id="tracked-objects-list">
+                <li>Loading...</li>
+            </ul>
+        </div>
 
-                    if (data.length === 0) {
-                        list.innerHTML = '<li>No objects tracked recently.</li>';
-                        return;
-                    }
-
-                    data.forEach(obj => {
-                        const listItem = document.createElement('li');
-                        // Add class based on how recently the object was seen
-                        if (obj.time_since_seen < 3.0) { // Emphasize if seen < 3 seconds ago
-                            listItem.classList.add('recent');
-                        } else {
-                             listItem.classList.add('stale');
-                        }
-
-                        // Format the last seen time
-                        const lastSeenDate = new Date(obj.last_seen_timestamp * 1000); // Convert seconds to milliseconds
-                        const timeString = lastSeenDate.toLocaleTimeString();
-                        const dateString = lastSeenDate.toLocaleDateString();
-
-
-                        listItem.textContent = `ID: ${obj.id} - ${obj.name}`;
-                        const timeSpan = document.createElement('span');
-                        timeSpan.classList.add('timestamp');
-                        timeSpan.textContent = `(Seen ${obj.time_since_seen}s ago at ${timeString})`;
-                        listItem.appendChild(timeSpan);
-
-                        list.appendChild(listItem);
-                    });
-                })
-                .catch(error => {
-                    console.error('Error fetching tracked objects:', error);
-                    const list = document.getElementById('tracked-objects-list');
-                    list.innerHTML = '<li>Error loading data.</li>';
-                });
-        }
-
-        // Update the list every 2 seconds - obsolete
-        // setInterval(updateTrackedObjects, 2000);
-
-        // obsoltete
-        // updateTrackedObjects(); // Uncommenting this line to call the function
-
-        // --- Debug Rendering Toggle ---
-        const toggleBtn = document.getElementById('toggleDebugRenderingBtn');
-        const statusSpan = document.getElementById('debugRenderingStatus');
-        const debugRenderingContainer = document.getElementById('debugRenderingContainer');
-
-        async function fetchDebugRenderingStatus() {
-            try {
-                const response = await fetch('/api/backend_annotation/status');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                updateButtonStatus(data.backend_annotation_enabled);
-
-                // Show or hide the debug rendering feed based on the status
-               if (data.backend_annotation_enabled) {
-                    debugRenderingContainer.classList.remove('hidden');
-                } else {
-                    debugRenderingContainer.classList.add('hidden');
-                }
-            } catch (error) {
-                console.error('Error fetching debug rendering status:', error);
-                statusSpan.textContent = 'Status: Error';
-            }
-        }
-
-        function updateButtonStatus(isEnabled) {
-            if (isEnabled) {
-                statusSpan.textContent = 'Status: Enabled';
-                debugRenderingContainer.classList.remove('hidden');
-                // Update button text for clarity
-                toggleBtn.textContent = 'Hide Debug Rendering';
-            } else {
-                statusSpan.textContent = 'Status: Disabled';
-                debugRenderingContainer.classList.add('hidden');
-                // Update button text for clarity
-                toggleBtn.textContent = 'Show Debug Rendering';
-            }
-        }
-
-        toggleBtn.addEventListener('click', async () => {
-            try {
-                statusSpan.textContent = 'Status: Toggling...'; // Provide feedback
-                const response = await fetch('/api/backend_annotation/toggle', { method: 'POST' });
-                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                updateButtonStatus(data.backend_annotation_enabled);
-            } catch (error) {
-                console.error('Error toggling debug rendering:', error);
-                statusSpan.textContent = 'Status: Error';
-                // Fetch status again to be sure
-                fetchDebugRenderingStatus();
-            }
-        });
-
-        // Fetch initial status on page load
-        fetchDebugRenderingStatus();
-        // --- End Debug Rendering Toggle ---
-
-        // --- Client-Side Detection Drawing ---
-        const videoFeed = document.getElementById('videoFeed');
-        const canvas = document.getElementById('detectionCanvas');
-        const ctx = canvas.getContext('2d');
-        let originalFrameWidth = null;
-        let originalFrameHeight = null;
-
-        function resizeCanvas() {
-            // Match canvas size to the displayed image size
-            canvas.width = videoFeed.clientWidth;
-            canvas.height = videoFeed.clientHeight;
-            // console.log(`Canvas resized to: ${canvas.width}x${canvas.height}`);
-        }
-
-        const objectFilterInput = document.getElementById('objectFilterInput');
-        const setObjectFilterBtn = document.getElementById('setObjectFilterBtn');
-
-        async function fetchObjectFilter() {
-            try {
-                const response = await fetch('/api/get_object_filter');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                if (data.object_filter) {
-                    objectFilterInput.value = data.object_filter.join(',');
-                } else {
-                    objectFilterInput.value = ''; // Clear if filter is null or empty
-                }
-                console.log('Current object filter:', data.object_filter);
-            } catch (error) {
-                console.error('Error fetching object filter:', error);
-            }
-        }
-
-        async function setObjectFilter() {
-            const filterValue = objectFilterInput.value.split(',').map(item => item.trim()).filter(item => item);
-            try {
-                const response = await fetch('/api/set_object_filter', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ object_filter: filterValue })
-                });
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                console.log('Object filter set to:', data.object_filter);
-                fetchObjectFilter(); // Refresh the displayed filter
-            } catch (error) {
-                console.error('Error setting object filter:', error);
-            }
-        }
-
-        setObjectFilterBtn.addEventListener('click', setObjectFilter);
-
-        async function fetchAndDrawDetections() {
-            if (!videoFeed.complete || videoFeed.naturalWidth === 0) {
-                requestAnimationFrame(fetchAndDrawDetections);
-                return;
-            }
-
-            if (canvas.width !== videoFeed.clientWidth || canvas.height !== videoFeed.clientHeight) {
-                resizeCanvas();
-            }
-
-            try {
-                const response = await fetch('/api/current_detections');
-                if (!response.ok) {
-                    console.error('Failed to fetch detections:', response.statusText);
-                    return;
-                }
-                const data = await response.json();
-
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-                if (!data.detections || data.detections.length === 0) {
-                    return;
-                }
-
-                const objectFilterResponse = await fetch('/api/get_object_filter');
-                const filterData = await objectFilterResponse.json();
-                const objectFilter = filterData.object_filter || [];
-
-                if (objectFilter.length === 0) {
-                    return; // Skip drawing if the filter is empty
-                }
-
-                // Ensure original frame dimensions are set
-                if (!originalFrameWidth || !originalFrameHeight) {
-                    originalFrameWidth = data.frame_width;
-                    originalFrameHeight = data.frame_height;
-                }
-
-                // Calculate scaling factors based on the displayed size vs original size
-                const scaleX = canvas.width / originalFrameWidth;
-                const scaleY = canvas.height / originalFrameHeight;
-
-                data.detections.forEach(det => {
-                    if (objectFilter.length > 0 && !objectFilter.includes(det.label)) {
-                        return;
-                    }
-
-                    const [x1, y1, x2, y2] = det.box;
-                    const label = det.label || 'unknown';
-                    const color = det.color ? `rgb(${det.color[0]}, ${det.color[1]}, ${det.color[2]})` : 'red';
-
-                    const canvasX1 = x1 * scaleX;
-                    const canvasY1 = y1 * scaleY;
-                    const canvasW = (x2 - x1) * scaleX;
-                    const canvasH = (y2 - y1) * scaleY;
-
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = 2;
-                    ctx.strokeRect(canvasX1, canvasY1, canvasW, canvasH);
-
-                    ctx.fillStyle = color;
-                    const text = `${label} (ID: ${det.track_id || 'unknown'})`;
-                    ctx.font = '12px Arial';
-                    const textMetrics = ctx.measureText(text);
-                    const textHeight = 12;
-                    ctx.fillRect(canvasX1, canvasY1 - textHeight - 4, textMetrics.width + 4, textHeight + 4);
-
-                    ctx.fillStyle = 'white';
-                    ctx.fillText(text, canvasX1 + 2, canvasY1 - 4);
-                });
-            } catch (error) {
-                console.error('Error fetching or drawing detections:', error);
-            }
-        }
-
-        // --- Initialization ---
-
-        // Ensure canvas is sized correctly initially and on resize/load
-        videoFeed.onload = () => {
-            console.log("Video feed image loaded or reloaded.");
-            resizeCanvas();
-            // It's generally better to have a single loop running
-        };
-        window.addEventListener('resize', resizeCanvas);
-
-        // Handle cases where the image might already be cached/loaded before onload attaches
-        if (videoFeed.complete && videoFeed.naturalWidth !== 0) {
-             console.log("Video feed image already complete.");
-             resizeCanvas();
-        }
-
-        // Start the drawing loop
-        setInterval(fetchAndDrawDetections, 100); // Fetch and draw every 100ms
-
-        // Fetch initial object filter on page load
-        fetchObjectFilter();
-        // Periodically refresh the object filter display
-        setInterval(fetchObjectFilter, 5000); // Refresh every 5 seconds
-
-        // Initial call to size canvas (in case image loads before JS runs fully)
-        // resizeCanvas(); // resizeCanvas is called on load or if already complete
-
-        // --- End Client-Side Detection Drawing ---
-
-        // --- Updated Tracked Objects List ---
-        function updateTrackedObjectsList() {
-            fetch('/api/tracked_objects')
-                .then(response => response.json())
-                .then(data => {
-                    console.log("Received tracked objects:", data); // Debugging log
-                    const trackedObjectsList = document.getElementById('tracked-objects-list');
-                    trackedObjectsList.innerHTML = ''; // Clear current list
-
-                    if (data.length === 0) {
-                        trackedObjectsList.innerHTML = '<li>No objects tracked recently.</li>';
-                        return;
-                    }
-
-                    // Sort objects by time_since_seen (latest to oldest)
-                    data.sort((a, b) => a.time_since_seen - b.time_since_seen);
-
-                    // Limit the list to the 5 most recent objects
-                    const limitedData = data.slice(0, 5);
-
-                    limitedData.forEach(obj => {
-                        const listItem = document.createElement('li');
-                        listItem.className = 'list-group-item';
-
-                        // Highlight current detections (seen within 3 seconds)
-                        if (obj.time_since_seen < 3.0) {
-                            listItem.classList.add('recent');
-                        }
-
-                        // Add thumbnail if available
-                        if (obj.detection_image) {
-                            const img = document.createElement('img');
-                            img.src = 'data:image/jpeg;base64,' + obj.detection_image;
-                            img.alt = `Object ${obj.id}`;
-                            img.style.width = '60px';
-                            img.style.height = '60px';
-                            listItem.appendChild(img);
-                        } else {
-                            console.warn(`No image for object ID ${obj.id}`); // Debugging log
-                        }
-
-                        // Add object details
-                        const text = document.createTextNode(`ID: ${obj.id}, Name: ${obj.name}, Seen: ${obj.time_since_seen}s ago`);
-                        listItem.appendChild(text);
-
-                        trackedObjectsList.appendChild(listItem);
-                    });
-                })
-                .catch(error => {
-                    console.error("Error fetching tracked objects:", error);
-                });
-        }
-
-        // Call this function when the page loads and periodically
-        updateTrackedObjectsList();
-        setInterval(updateTrackedObjectsList, 1000); // Update every 2 seconds
-
-        const toggleTrackingBtn = document.getElementById('toggleTrackingBtn');
-        const trackingStatusSpan = document.getElementById('trackingStatus');
-
-        async function fetchTrackingStatus() {
-            try {
-                const response = await fetch('/api/tracking_status');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                updateTrackingButtonStatus(data.tracking_enabled);
-            } catch (error) {
-                console.error('Error fetching tracking status:', error);
-                trackingStatusSpan.textContent = 'Status: Error';
-            }
-        }
-
-        function updateTrackingButtonStatus(isEnabled) {
-            if (isEnabled) {
-                trackingStatusSpan.textContent = 'Status: Enabled';
-                toggleTrackingBtn.textContent = 'Disable Tracking';
-            } else {
-                trackingStatusSpan.textContent = 'Status: Disabled';
-                toggleTrackingBtn.textContent = 'Enable Tracking';
-            }
-        }
-
-        toggleTrackingBtn.addEventListener('click', async () => {
-            try {
-                trackingStatusSpan.textContent = 'Status: Toggling...';
-                const response = await fetch('/api/toggle_tracking', { method: 'POST' });
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                updateTrackingButtonStatus(data.tracking_enabled);
-            } catch (error) {
-                console.error('Error toggling tracking:', error);
-                trackingStatusSpan.textContent = 'Status: Error';
-            }
-        });
-
-        // Fetch initial status on page load
-        fetchTrackingStatus();
-    </script>
+        <script src="{{ url_for('static', filename='script.js') }}" defer></script>
+    </div> <!-- Close page-container -->
 </body>
 </html>
