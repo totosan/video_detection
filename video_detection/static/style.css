@@ -38,8 +38,15 @@ img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px;
     border-radius: 8px; 
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
-.controls label { margin-right: 5px; }
-.controls input[type="text"] { padding: 8px; border-radius: 4px; border: 1px solid #ccc; margin-right: 5px;}
+.controls label { margin-right: 5px; font-weight: bold; margin-bottom: 4px;}
+.controls input[type="text"], .controls select {
+    padding: 8px; 
+    border-radius: 4px; 
+    border: 1px solid #ccc; 
+    margin-right: 5px;
+    width: 100%; /* Make form elements take full width of their container */
+    box-sizing: border-box; /* Include padding and border in the element's total width and height */
+}
 button { 
     padding: 8px 15px; 
     font-size: 0.9em; 
@@ -60,9 +67,18 @@ button.button-active {
 button.button-active:hover {
     background-color: #1e7e34; /* Darker green on hover */
 }
+.controls button {
+    width: 100%; /* Make buttons take full width of their container */
+    margin-left: 0; /* Remove margin-left as items are stacked now */
+}
 .status-label {
     margin-left: 10px;
     font-style: italic;
+    font-size: 0.9em;
+    color: #555;
+    margin-top: 4px;
+    width: 100%;      /* Ensure status label also takes full width */
+    text-align: left; /* Align text to the left */
 }
 /* Added for toggling visibility */
 .hidden {
@@ -78,17 +94,28 @@ button.button-active:hover {
 
 .control-panel {
     display: flex;
-    flex-wrap: wrap; /* Allow controls to wrap on smaller screens */
-    gap: 15px; /* Space between control groups */
+    flex-wrap: wrap; /* Allows items to wrap to the next line */
+    gap: 20px;      /* Space between control groups */
     padding: 15px;
-    background-color: #e9ecef;
+    /* background-color: #f8f9fa; */ /* Original background */
+    background-color: #e9ecef; /* Kept existing background from file */
     border-radius: 8px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    margin-bottom: 20px;
+    align-items: flex-start; /* Align groups to the top */
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05); /* Kept existing shadow */
 }
-.control-panel .controls { /* Adjust individual control group styling within the panel */
+
+.control-panel .controls { 
+    display: flex;
+    flex-direction: column; /* Stack label, input, button vertically */
+    gap: 8px;          /* Space between elements within a control group */
+    padding: 10px;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    background-color: #ffffff;
     flex: 1; /* Allow control groups to grow */
-    min-width: 280px; /* Minimum width for each control group */
-    margin-bottom: 0; /* Remove bottom margin as gap is used */
+    min-width: 220px; /* Minimum width for each control group, adjust as needed */
+    margin-bottom: 0; /* Remove bottom margin as gap is used by control-panel */
 }
 
 .video-streams-panel {
@@ -100,4 +127,10 @@ button.button-active:hover {
     flex: 1; /* Allow feeds to grow */
     min-width: 300px; /* Minimum width for a video feed, adjust as needed */
     /* max-width: calc(50% - 10px); Remove if you prefer them to take full width when stacking */
+}
+
+/* Ensure the video source status also takes full width if needed */
+#videoSourceStatus {
+    width: 100%;
+    text-align: left; /* Or center, depending on preference */
 }

@@ -15,6 +15,7 @@ import signal
 # Import static config and the new system manager
 from config import STATIC_FOLDER, TEMPLATE_FOLDER, RTSP_STREAM_URL # Only import static config
 from detection_system import DetectionSystem
+from utilities.read_video_source import find_available_cameras # Added import
 
 # Initialize Flask app
 app = Flask(__name__, static_folder=STATIC_FOLDER, template_folder=TEMPLATE_FOLDER)
@@ -120,6 +121,48 @@ def api_tracked_objects():
 
     logger.debug(f"API Response: {len(objects_list)} objects, {sum(1 for obj in objects_list if 'detection_image' in obj)} with images")
     return jsonify(objects_list)
+
+# --- API Endpoint for Available Cameras ---
+@app.route('/api/cams', methods=['GET'])
+def api_cams():
+    """API endpoint to get a list of available video sources."""
+    try:
+        cameras = find_available_cameras(max_cameras_to_check=5) # Limit check for speed
+        logger.info(f"API: Found {len(cameras)} available cameras.")
+        return jsonify(cameras)
+    except Exception as e:
+        logger.exception("API: Error finding available cameras")
+        return jsonify({"error": "Failed to retrieve camera list", "details": str(e)}), 500
+# -----------------------------------------
+
+# --- API Endpoint for Setting Video Source ---
+@app.route('/api/selected_videosource', methods=['POST'])
+def set_selected_videosource():
+    """API endpoint to set the video source for the detection system."""
+    try:
+        data = request.get_json()
+        if not data or 'source_identifier' not in data:
+            logger.warning("API: Invalid request to set video source. 'source_identifier' missing.")
+            return jsonify({"error": "Missing 'source_identifier' in request"}), 400
+
+        source_identifier = data['source_identifier']
+        logger.info(f"API: Request to change video source to: {source_identifier}")
+
+        # Assuming detection_system has a method to change its source
+        # This method needs to be implemented in DetectionSystem class
+        success, message = detection_system.change_video_source(source_identifier)
+
+        if success:
+            logger.info(f"API: Video source changed successfully to {source_identifier}.")
+            return jsonify({"message": message, "new_source": source_identifier}), 200
+        else:
+            logger.error(f"API: Failed to change video source to {source_identifier}. Reason: {message}")
+            return jsonify({"error": message, "requested_source": source_identifier}), 500
+
+    except Exception as e:
+        logger.exception("API: Error setting video source")
+        return jsonify({"error": "Failed to set video source", "details": str(e)}), 500
+# -------------------------------------------
 
 # --- New API Endpoint for Current Detections ---
 @app.route('/api/current_detections_light')

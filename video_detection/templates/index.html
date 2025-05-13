@@ -26,6 +26,17 @@
                 <button id="setObjectFilterBtn">Set Filter</button>
                 <div style="margin-top: 5px;">Current Active Filter: <strong id="currentFilterStatusLabel">Loading...</strong></div>
             </div>
+
+            <div class="controls"> <!-- New Camera Selection Controls -->
+                <label for="cameraSelectList">Select Video Source:</label>
+                <select id="cameraSelectList">
+                    <option value="">Loading cameras...</option>
+                </select>
+                <label for="rtspUrlInput" style="margin-top: 10px;">Or Enter RTSP URL:</label>
+                <input type="text" id="rtspUrlInput" placeholder="rtsp://...">
+                <button id="setVideoSourceBtn" style="margin-top: 10px;">Change Source</button>
+                <span id="videoSourceStatus" class="status-label"></span>
+            </div>
         </div>
 
         <div class="video-streams-panel">

@@ -34,24 +34,7 @@ class DetectionSystem:
         # --- Determine Source Type and Identifier ---
         self.source_identifier = None
         self.source_type = None # "rtsp" or "device"
-
-        if self.rtsp_stream_url_config.isdigit():
-            try:
-                self.source_identifier = int(self.rtsp_stream_url_config)
-                self.source_type = "device"
-                logger.info(f"Configured video source is a device index: {self.source_identifier}")
-            except ValueError: # Should not happen if isdigit() is true, but as a safeguard
-                logger.error(f"Could not parse '{self.rtsp_stream_url_config}' as a device index. Defaulting to RTSP interpretation.")
-                self.source_identifier = self.rtsp_stream_url_config
-                self.source_type = "rtsp"
-        elif not self.rtsp_stream_url_config: # Handle empty string case
-            logger.error("VIDEO_URL is empty. DetectionSystem cannot start without a video source.")
-            # Consider raising an error or setting a state that prevents start()
-            raise ValueError("VIDEO_URL (RTSP_STREAM_URL) is not configured.")
-        else:
-            self.source_identifier = self.rtsp_stream_url_config
-            self.source_type = "rtsp"
-            logger.info(f"Configured video source is an RTSP URL: {self.source_identifier}")
+        self._set_source_from_config(self.rtsp_stream_url_config) # Use a helper
         # ---------------------------------------------
 
         # --- Determine Model Path based on TensorRT/CUDA availability ---
@@ -128,6 +111,51 @@ class DetectionSystem:
         self.object_detector = None
         self.annotation_worker = None
         logger.info("DetectionSystem initialized.")
+
+    def _set_source_from_config(self, source_config_value):
+        """Helper to set source_identifier and source_type based on a config string."""
+        if isinstance(source_config_value, int) or (isinstance(source_config_value, str) and source_config_value.isdigit()):
+            try:
+                self.source_identifier = int(source_config_value)
+                self.source_type = "device"
+                logger.info(f"Video source set to device index: {self.source_identifier}")
+            except ValueError:
+                logger.error(f"Could not parse '{source_config_value}' as a device index. Defaulting to RTSP/URL interpretation.")
+                self.source_identifier = str(source_config_value) # Ensure it's a string if parsing failed
+                self.source_type = "rtsp" # Or "url"
+        elif isinstance(source_config_value, str) and not source_config_value:
+            logger.error("Video source string is empty. Cannot set source.")
+            # Retain previous valid source or handle error appropriately
+            # For now, this will likely cause issues if called with empty string during init without a default
+            raise ValueError("Video source string cannot be empty.")
+        else:
+            self.source_identifier = str(source_config_value)
+            self.source_type = "rtsp" # Or "url"
+            logger.info(f"Video source set to RTSP/URL: {self.source_identifier}")
+
+    def change_video_source(self, new_source_identifier):
+        """Stops the current video stream, changes the source, and restarts."""
+        logger.info(f"Attempting to change video source to: {new_source_identifier}")
+        try:
+            # Validate new_source_identifier (e.g., check if it's an int for camera index or string for URL)
+            # For simplicity, we'll assume it's correctly formatted for now.
+            # Stop existing workers
+            self.stop() # This should wait for threads to join
+            logger.info("Detection system stopped for source change.")
+
+            # Update the source identifier and type
+            self._set_source_from_config(new_source_identifier)
+
+            # Restart the system with the new source
+            # The start() method will use the updated self.source_identifier and self.source_type
+            self.start()
+            logger.info(f"Detection system restarted with new source: {self.source_identifier}")
+            return True, f"Successfully changed video source to {self.source_identifier}"
+        except Exception as e:
+            logger.exception(f"Failed to change video source to {new_source_identifier}")
+            # Attempt to revert or restart with old source if possible, or leave system stopped
+            # For now, we'll just log and return failure
+            return False, f"Error changing video source: {str(e)}"
 
     # --- State Update Callbacks/Methods ---
     # These methods will be passed to the worker threads to update the central state safely

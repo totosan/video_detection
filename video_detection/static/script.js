@@ -23,7 +23,8 @@ let currentObjectFilter = [];
 // DOM Elements (to be cached on DOMContentLoaded)
 let toggleBtn, statusSpan, debugRenderingContainer, videoFeed, canvas, ctx,
     objectFilterInput, setObjectFilterBtn, currentFilterStatusLabel,
-    toggleTrackingBtn, trackingStatusSpan, trackedObjectsList;
+    toggleTrackingBtn, trackingStatusSpan, trackedObjectsList,
+    cameraSelectList, setVideoSourceBtn, videoSourceStatus, rtspUrlInput; // Added rtspUrlInput
 
 // Generic Utility Functions
 function updateToggleButtoState(buttonElement, statusElement, isEnabled, enabledText, disabledText) {
@@ -230,6 +231,127 @@ async function fetchAndDrawDetections() {
     requestAnimationFrame(fetchAndDrawDetections); // Continue the animation loop
 }
 
+// --- Camera Selection --- 
+async function fetchAvailableCameras() {
+    if (!cameraSelectList) return;
+    try {
+        const response = await fetch("/api/cams");
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const cameras = await response.json();
+
+        cameraSelectList.innerHTML = ''; // Clear existing options
+
+        if (cameras.length === 0) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No cameras found";
+            cameraSelectList.appendChild(option);
+            return;
+        }
+
+        cameras.forEach(cam => {
+            const option = document.createElement("option");
+            // The value should be what the backend expects (index or RTSP URL)
+            // Assuming 'index' for device cameras, and 'name' might be the RTSP URL or a descriptor
+            // The backend's change_video_source will handle parsing this.
+            option.value = cam.index; // Assuming index is the primary identifier for local cameras
+            option.textContent = `${cam.name} (Index: ${cam.index}, ${cam.width}x${cam.height})`;
+            cameraSelectList.appendChild(option);
+        });
+    } catch (error) {
+        console.error("Error fetching available cameras:", error);
+        if (cameraSelectList) {
+            cameraSelectList.innerHTML = '<option value="">Error loading cameras</option>';
+        }
+        if (videoSourceStatus) videoSourceStatus.textContent = "Error loading cameras.";
+    }
+}
+
+async function setSelectedVideoSource() {
+    if (!setVideoSourceBtn || !videoSourceStatus) return; // cameraSelectList and rtspUrlInput checked below
+
+    let selectedSourceIdentifier = "";
+    const rtspValue = rtspUrlInput ? rtspUrlInput.value.trim() : "";
+
+    if (rtspValue) {
+        selectedSourceIdentifier = rtspValue;
+        if (cameraSelectList) cameraSelectList.value = ""; // Clear dropdown selection
+        console.log("Using RTSP URL from input:", selectedSourceIdentifier);
+    } else if (cameraSelectList && cameraSelectList.value) {
+        selectedSourceIdentifier = cameraSelectList.value;
+        console.log("Using selected camera from dropdown:", selectedSourceIdentifier);
+    } else {
+        videoSourceStatus.textContent = "Please select a camera or enter an RTSP URL.";
+        return;
+    }
+
+    videoSourceStatus.textContent = `Changing source to ${selectedSourceIdentifier}...`;
+    setVideoSourceBtn.disabled = true;
+    if (cameraSelectList) cameraSelectList.disabled = true;
+    if (rtspUrlInput) rtspUrlInput.disabled = true;
+
+    try {
+        const response = await fetch("/api/selected_videosource", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ source_identifier: selectedSourceIdentifier })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.error || `HTTP error! status: ${response.status}`);
+        }
+
+        // Modify success message based on RTSP URL content
+        let successMessage = data.message || "Video source changed successfully!";
+        if (rtspValue && rtspValue.includes("@")) { // Check if using RTSP input and it contains "@"
+            successMessage = "Successfully changed video source to RTSP Source.";
+        } else if (rtspValue) { // Using RTSP input but no "@"
+             successMessage = `Successfully changed video source to ${selectedSourceIdentifier}`;
+        } else { // Using dropdown
+            successMessage = `Successfully changed video source to ${selectedSourceIdentifier}`;
+        }
+        videoSourceStatus.textContent = successMessage;
+        console.log("Video source change successful:", data);
+
+        // Clear the input that was used or the other one
+        if (rtspValue) {
+            if (rtspUrlInput) rtspUrlInput.value = ""; // Clear RTSP input if it was used
+        } else {
+            // If dropdown was used, no need to clear it here, 
+            // but good to clear RTSP input if user typed something then selected dropdown
+            if (rtspUrlInput) rtspUrlInput.value = ""; 
+        }
+
+        originalFrameWidth = null;
+        originalFrameHeight = null;
+        if (videoFeed) {
+            // Force reload of the video feed image to reflect the new source
+            // A common way is to append a meaningless query string that changes
+            const currentSrc = videoFeed.src.split("?")[0];
+            videoFeed.src = `${currentSrc}?t=${new Date().getTime()}`;
+        }
+        if (canvas && ctx) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+
+    } catch (error) {
+        console.error("Error setting video source:", error);
+        videoSourceStatus.textContent = `Error: ${error.message || "Failed to change source."}`;
+    }
+    setVideoSourceBtn.disabled = false;
+    if (cameraSelectList) cameraSelectList.disabled = false;
+    if (rtspUrlInput) rtspUrlInput.disabled = false;
+}
+
+function setupCameraControls() {
+    if (setVideoSourceBtn) {
+        setVideoSourceBtn.addEventListener("click", setSelectedVideoSource);
+    }
+}
+
 // --- Updated Tracked Objects List ---
 function updateTrackedObjectsList() {
     if (!trackedObjectsList) return;
@@ -372,6 +494,12 @@ function initializeApp() {
     trackingStatusSpan = document.getElementById("trackingStatus");
     trackedObjectsList = document.getElementById("tracked-objects-list");
 
+    // New camera control elements
+    cameraSelectList = document.getElementById("cameraSelectList");
+    rtspUrlInput = document.getElementById("rtspUrlInput"); // Cache RTSP input
+    setVideoSourceBtn = document.getElementById("setVideoSourceBtn");
+    videoSourceStatus = document.getElementById("videoSourceStatus");
+
     // Setup event listeners and initial state
     if (videoFeed) {
         videoFeed.onload = () => {
@@ -402,6 +530,10 @@ function initializeApp() {
 
     setInterval(updateTrackedObjectsList, UPDATE_INTERVALS.TRACKED_OBJECTS);
     setInterval(updateCurrentFilterStatusLabel, UPDATE_INTERVALS.FILTER_STATUS); // Periodically update filter status label
+
+    // Fetch and populate cameras
+    fetchAvailableCameras();
+    setupCameraControls();
 }
 
 // Wait for the DOM to be fully loaded before initializing
