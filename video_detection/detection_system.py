@@ -137,10 +137,8 @@ class DetectionSystem:
         """Stops the current video stream, changes the source, and restarts."""
         logger.info(f"Attempting to change video source to: {new_source_identifier}")
         try:
-            # Validate new_source_identifier (e.g., check if it's an int for camera index or string for URL)
-            # For simplicity, we'll assume it's correctly formatted for now.
             # Stop existing workers
-            self.stop() # This should wait for threads to join
+            self.stop() # This should wait for threads to join (with timeout)
             logger.info("Detection system stopped for source change.")
 
             # Update the source identifier and type
@@ -148,17 +146,28 @@ class DetectionSystem:
 
             # Restart the system with the new source
             # The start() method will use the updated self.source_identifier and self.source_type
-            self.start()
+            self.start() # This will now be more synchronous and will raise RuntimeError on failure
             logger.info(f"Detection system restarted with new source: {self.source_identifier}")
             return True, f"Successfully changed video source to {self.source_identifier}"
+        except RuntimeError as e: # Catch specific error from start()
+            logger.error(f"Failed to start detection system with new source {new_source_identifier}: {e}")
+            # Attempt to stop again to ensure clean state if start failed partially
+            self.stop_event.set() # Signal any potentially lingering threads from the failed start
+            # Ensure worker instances are None so a subsequent start attempt is clean
+            self.frame_grabber = None
+            self.object_detector = None
+            self.annotation_worker = None
+            return False, f"Error starting system with new video source: {str(e)}"
         except Exception as e:
-            logger.exception(f"Failed to change video source to {new_source_identifier}")
-            # Attempt to revert or restart with old source if possible, or leave system stopped
-            # For now, we'll just log and return failure
-            return False, f"Error changing video source: {str(e)}"
+            logger.exception(f"An unexpected error occurred while changing video source to {new_source_identifier}")
+            self.stop_event.set() # Ensure stop signal is set
+            # Ensure worker instances are None
+            self.frame_grabber = None
+            self.object_detector = None
+            self.annotation_worker = None
+            return False, f"Unexpected error changing video source: {str(e)}"
 
     # --- State Update Callbacks/Methods ---
-    # These methods will be passed to the worker threads to update the central state safely
 
     def update_latest_frame(self, frame):
         with self.frame_lock:
@@ -331,23 +340,30 @@ class DetectionSystem:
     # --- Lifecycle Management ---
     def start(self):
         if self.frame_grabber or self.object_detector or self.annotation_worker:
-            logger.warning("Detection system already running or not properly stopped.")
-            return
+            logger.warning("Detection system already running or not properly stopped. Attempting to stop first.")
+            self.stop() # Ensure a clean stop before trying to start again.
 
         logger.info("Starting DetectionSystem threads...")
         self.stop_event.clear()
 
-        # Clear queues and reset state asynchronously
-        threading.Thread(target=self._clear_queues_and_reset_state, daemon=True).start()
+        # Clear queues and reset state SYNCHRONOUSLY
+        self._clear_queues_and_reset_state()
+        logger.info("Queues and state cleared.")
+
 
         # Instantiate workers, passing necessary dependencies and callbacks
+        logger.info(f"Initializing FrameGrabber for source: {self.source_identifier} (type: {self.source_type})")
         self.frame_grabber = FrameGrabber(
             source_identifier=self.source_identifier,
             source_type=self.source_type,
             frame_queue=self.frame_queue,
             stop_event=self.stop_event,
-            frame_update_callback=self.update_latest_frame # Pass the callback
+            frame_update_callback=self.update_latest_frame
         )
+        logger.info("Initializing ObjectDetector...")
+        # Ensure model.names is available, provide an empty list or default if not
+        model_names = self.model.names if hasattr(self.model, 'names') and self.model.names is not None else []
+
         self.object_detector = ObjectDetector(
             model=self.model,
             frame_queue=self.frame_queue,
@@ -355,53 +371,90 @@ class DetectionSystem:
             stop_event=self.stop_event,
             results_update_callback=self.update_detection_results,
             max_track_points=self.max_track_points,
-            model_names=self.model.names,
-            tracker_config_path=CUSTOM_TRACKER_CONFIG # Pass the custom config path
+            model_names=model_names,
+            tracker_config_path=CUSTOM_TRACKER_CONFIG
         )
+        logger.info("Initializing AnnotationWorker...")
         self.annotation_worker = AnnotationWorker(
             annotation_queue=self.annotation_queue,
             stop_event=self.stop_event,
             annotated_frame_callback=self.update_latest_annotated_frame,
             max_track_points=self.max_track_points,
-            model_names=self.model.names,
-            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled # Pass the getter method
+            model_names=model_names,
+            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled
         )
+        logger.info("Worker instances created.")
 
-        # Start threads asynchronously
-        threading.Thread(target=self._start_workers, daemon=True).start()
+        # Start threads SYNCHRONOUSLY (the method itself will manage starting threads)
+        self._start_workers()
+        # _start_workers will log success or failure of thread starts and raise error if needed.
+
 
     def _clear_queues_and_reset_state(self):
-        # Clear queues and reset state
+        logger.info("Clearing queues and resetting state...")
+        # Clear queues
         while not self.frame_queue.empty():
-            try: self.frame_queue.get_nowait()
-            except queue.Empty: break
+            try:
+                item = self.frame_queue.get_nowait()
+                self.frame_queue.task_done() # Ensure task_done is called
+            except queue.Empty:
+                break
+            except Exception as e:
+                logger.warning(f"Error getting from frame_queue during clear: {e}")
+                break # Avoid infinite loop on other errors
+
         while not self.annotation_queue.empty():
-            try: self.annotation_queue.get_nowait()
-            except queue.Empty: break
-        self.latest_frame = None
-        self.latest_annotated_frame = None
-        self.latest_detections_data = {"results": None, "frame_shape": None, "track_history": {}, "tracked_objects_info": {}}
+            try:
+                item = self.annotation_queue.get_nowait()
+                self.annotation_queue.task_done() # Ensure task_done is called
+            except queue.Empty:
+                break
+            except Exception as e:
+                logger.warning(f"Error getting from annotation_queue during clear: {e}")
+                break
+        
+        # Reset state variables
+        with self.frame_lock:
+            self.latest_frame = None
+        with self.annotated_frame_lock:
+            self.latest_annotated_frame = None
+        with self.detections_data_lock:
+            self.latest_detections_data = {"results": None, "frame_shape": None, "track_history": {}, "tracked_objects_info": {}}
+        with self.detection_images_lock: # Also clear detection images
+            self.detection_images.clear()
+        logger.info("Queues and state reset complete.")
+
 
     def _start_workers(self):
+        logger.info("Attempting to start worker threads...")
+
         logger.info("Starting FrameGrabber thread...")
-        self.frame_grabber.start()
-        time.sleep(0.1)
-        logger.info("FrameGrabber thread started.")
+        if self.frame_grabber:
+            self.frame_grabber.start()
+        time.sleep(0.05) 
 
         logger.info("Starting ObjectDetector thread...")
-        self.object_detector.start()
-        time.sleep(0.1)
-        logger.info("ObjectDetector thread started.")
+        if self.object_detector:
+            self.object_detector.start()
+        time.sleep(0.05)
 
         logger.info("Starting AnnotationWorker thread...")
-        self.annotation_worker.start()
-        logger.info("AnnotationWorker thread started.")
+        if self.annotation_worker:
+            self.annotation_worker.start()
+        time.sleep(0.05)
 
-        if self.frame_grabber.is_alive() and self.object_detector.is_alive() and self.annotation_worker.is_alive():
-            logger.info("DetectionSystem threads started successfully.")
+        # Check if threads actually started
+        fg_alive = self.frame_grabber and self.frame_grabber.is_alive()
+        od_alive = self.object_detector and self.object_detector.is_alive()
+        aw_alive = self.annotation_worker and self.annotation_worker.is_alive()
+
+        if fg_alive and od_alive and aw_alive:
+            logger.info("All DetectionSystem worker threads appear to have started successfully.")
         else:
-            logger.error("One or more DetectionSystem threads failed to start.")
-            self.stop()
+            logger.error(f"One or more DetectionSystem threads failed to start. Status: FG_alive={fg_alive}, OD_alive={od_alive}, AW_alive={aw_alive}")
+            self.stop_event.set() # Signal all to stop
+            # Raise an error to indicate failure to start, which can be caught by change_video_source
+            raise RuntimeError(f"Failed to start all worker threads. Status: FG_alive={fg_alive}, OD_alive={od_alive}, AW_alive={aw_alive}")
 
     def stop(self):
         logger.info("Stopping DetectionSystem threads...")

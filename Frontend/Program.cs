@@ -9,6 +9,7 @@ using Microsoft.SemanticKernel.Agents.Chat;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.Ollama; // Provides AddOllamaChatCompletion extension
 using Microsoft.SemanticKernel.Connectors.OpenAI; // Provides AddOpenAIChatCompletion extension
+using Microsoft.SemanticKernel.Connectors.HuggingFace; // Provides AddHuggingFaceChatCompletion extension
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol.Transport;
 using ModelContextProtocol.Protocol.Types;
@@ -16,6 +17,7 @@ using DotNetEnv; // Added for .env file support
 
 #pragma warning disable SKEXP0070 // Acknowledge experimental status of Ollama connector
 #pragma warning disable SKEXP0110 // Acknowledge experimental status of Ollama connector
+#pragma warning disable SKEXP0071 // Acknowledge experimental status of HuggingFace connector
 
 public class Program
 {
@@ -24,8 +26,9 @@ public class Program
         // Load environment variables from .env file
         Env.Load();
 
-        // Determine if running in online mode (using OpenAI)
+        // Determine if running in online mode (using OpenAI) or Hugging Face
         bool useOpenAI = args.Contains("-online");
+        bool useHuggingFace = args.Contains("-huggingface");
 
         // Configure these to your Ollama setup
         var ollamaMode_text_lId = "llama3.2"; // Or your preferred model, e.g., "mistral", "phi3"
@@ -37,10 +40,20 @@ public class Program
         // Read API key from environment variable
         var openAIApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
 
+        // Configure these for your Hugging Face setup
+        var huggingFaceModelId = "google/gemma-2-9b-it"; // Or your preferred model
+        var huggingFaceApiKey = Environment.GetEnvironmentVariable("HUGGINGFACE_API_KEY");
+
         if (useOpenAI && string.IsNullOrEmpty(openAIApiKey))
         {
             Console.WriteLine("OpenAI API key is not set. Please set the OPENAI_API_KEY environment variable in your .env file.");
-            return;
+            // Potentially fallback or exit, for now, we let the logic below handle it
+        }
+
+        if (useHuggingFace && string.IsNullOrEmpty(huggingFaceApiKey))
+        {
+            Console.WriteLine("Hugging Face API key is not set. Please set the HUGGINGFACE_API_KEY environment variable in your .env file.");
+            // Potentially fallback or exit
         }
 
         var builder = Kernel.CreateBuilder();
@@ -59,17 +72,22 @@ public class Program
         );
 
         // Add OpenAI Chat Completion only if using OpenAI and API key is present
-        if (useOpenAI)
+        if (useOpenAI && !string.IsNullOrEmpty(openAIApiKey))
         {
-            if (string.IsNullOrEmpty(openAIApiKey))
-            {
-                Console.WriteLine("OpenAI API key is not set. Please set the OPENAI_API_KEY environment variable in your .env file or ensure the .env file is in the correct location (Frontend directory).");
-                return;
-            }
             builder.AddOpenAIChatCompletion(
                 modelId: openAIModelId,
                 apiKey: openAIApiKey, // Use the key read from .env
                 serviceId: "openAI" // Specify a service key for keyed retrieval
+            );
+        }
+
+        // Add Hugging Face Chat Completion if using HuggingFace and API key is present
+        if (useHuggingFace && !string.IsNullOrEmpty(huggingFaceApiKey))
+        {
+            builder.AddHuggingFaceChatCompletion(
+                model: huggingFaceModelId,
+                apiKey: huggingFaceApiKey,
+                serviceId: "huggingFace" // Specify a service key for keyed retrieval
             );
         }
 
@@ -93,7 +111,7 @@ public class Program
         var settingsTxt = new OllamaPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(), ServiceId = "ollamaTxt" };
         var settingsVis = new OllamaPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.None(), ServiceId = "ollamaVis" };
         var settingsOpenAI = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(), ServiceId = "openAI" };
-
+        var settingsHuggingFace = new HuggingFacePromptExecutionSettings { ServiceId = "huggingFace" }; // FunctionChoiceBehavior not available
 
         // Retrieve the chat completion service
         var chatCompletionService = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaTxt");
@@ -101,14 +119,20 @@ public class Program
         IChatCompletionService? chatCompletionServiceOpenAI = null; // Initialize as nullable
         if (useOpenAI && !string.IsNullOrEmpty(openAIApiKey)) // Only retrieve if it should have been added
         {
-            chatCompletionServiceOpenAI = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("openAI");
+            chatCompletionServiceOpenAI = kernel.Services.GetKeyedService<IChatCompletionService>("openAI");
         }
+
+        IChatCompletionService? chatCompletionServiceHuggingFace = null; // Initialize as nullable
+        if (useHuggingFace && !string.IsNullOrEmpty(huggingFaceApiKey)) // Only retrieve if it should have been added
+        {
+            chatCompletionServiceHuggingFace = kernel.Services.GetKeyedService<IChatCompletionService>("huggingFace");
+        }
+
 
         // Create the plugin once, as it's used by both OpenAI and Ollama (Txt)
         var pluginsObjectDetection = KernelPluginFactory.CreateFromObject(new Tools(chatCompletionServiceVis), "objectDetection");
 
         IChatCompletionService activeChatService;
-        KernelFunction? availableFunctions = null; // This variable is unused, consider removing if not needed later
         PromptExecutionSettings? activeSettings;
         Kernel activeKernel; 
 
@@ -120,10 +144,19 @@ public class Program
             kernel.Plugins.Add(pluginsObjectDetection); // Add plugins to the main kernel for OpenAI
             activeKernel = kernel; 
         }
+        else if (useHuggingFace && chatCompletionServiceHuggingFace != null) // Check if Hugging Face service was successfully retrieved
+        {
+            Console.WriteLine("Using Hugging Face API.");
+            activeChatService = chatCompletionServiceHuggingFace;
+            activeSettings = settingsHuggingFace;
+            var kernelHf = kernel.Clone(); // Clone the kernel for HuggingFace-specific plugins/config
+            kernelHf.Plugins.Add(pluginsObjectDetection); // Add plugins to the cloned kernel for HuggingFace
+            activeKernel = kernelHf;
+        }
         else
         {
-            Console.WriteLine("Using Ollama API (either -online not specified, API key missing, or OpenAI service retrieval failed) with function calling.");
-            activeChatService = chatCompletionService;
+            Console.WriteLine("Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            activeChatService = chatCompletionService; // Default to Ollama text
             activeSettings = settingsTxt;
             var kernelTxt = kernel.Clone(); // Clone the kernel for Ollama-specific plugins
             kernelTxt.Plugins.Add(pluginsObjectDetection); // Add plugins to the cloned kernel for Ollama Txt
@@ -131,7 +164,7 @@ public class Program
         }
 
 
-        Console.WriteLine($"Chat with {(useOpenAI && chatCompletionServiceOpenAI != null ? "OpenAI" : "Ollama")} model (type 'exit' to quit):");
+        Console.WriteLine($"Chat with {(useOpenAI && chatCompletionServiceOpenAI != null ? "OpenAI" : (useHuggingFace && chatCompletionServiceHuggingFace != null ? "Hugging Face" : "Ollama"))} model (type 'exit' to quit):");
         var chatHistory = new ChatHistory("""
         You are an assistant that can help the user with video analysis.
         You are able to detect objects in a video stream and provide a detailed description of the visual data. 
@@ -343,3 +376,4 @@ public class Program
 
 #pragma warning restore SKEXP0070
 #pragma warning restore SKEXP0110
+#pragma warning restore SKEXP0071
