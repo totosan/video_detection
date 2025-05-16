@@ -1,0 +1,12 @@
+{
+	"tasks": [
+		{
+			"type": "dotnet",
+			"task": "build",
+			"file": "/Users/toto/Projects/JetsonNano/ai-video-solution/Frontend/Frontend.csproj",
+			"group": "build",
+			"problemMatcher": [],
+			"label": "build"
+		}
+	]
+}

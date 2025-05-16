@@ -113,7 +113,12 @@ class DetectionSystem:
         logger.info("DetectionSystem initialized.")
 
     def _set_source_from_config(self, source_config_value):
-        """Helper to set source_identifier and source_type based on a config string."""
+        """Helper to set source_identifier and source_type based on a config string or int."""
+        logger.info(f"_set_source_from_config: Received value: {source_config_value!r} (type: {type(source_config_value)})")
+        # Normalize input: if string, strip whitespace
+        if isinstance(source_config_value, str):
+            source_config_value = source_config_value.strip()
+        # Try to interpret as device index if possible
         if isinstance(source_config_value, int) or (isinstance(source_config_value, str) and source_config_value.isdigit()):
             try:
                 self.source_identifier = int(source_config_value)
@@ -121,16 +126,14 @@ class DetectionSystem:
                 logger.info(f"Video source set to device index: {self.source_identifier}")
             except ValueError:
                 logger.error(f"Could not parse '{source_config_value}' as a device index. Defaulting to RTSP/URL interpretation.")
-                self.source_identifier = str(source_config_value) # Ensure it's a string if parsing failed
-                self.source_type = "rtsp" # Or "url"
+                self.source_identifier = str(source_config_value)
+                self.source_type = "rtsp"
         elif isinstance(source_config_value, str) and not source_config_value:
             logger.error("Video source string is empty. Cannot set source.")
-            # Retain previous valid source or handle error appropriately
-            # For now, this will likely cause issues if called with empty string during init without a default
             raise ValueError("Video source string cannot be empty.")
         else:
             self.source_identifier = str(source_config_value)
-            self.source_type = "rtsp" # Or "url"
+            self.source_type = "rtsp"
             logger.info(f"Video source set to RTSP/URL: {self.source_identifier}")
 
     def change_video_source(self, new_source_identifier):

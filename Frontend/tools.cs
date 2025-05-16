@@ -111,7 +111,7 @@ namespace Frontend
         public async Task<string> GetRawSnapshotAsync()
         {
             Console.WriteLine("Getting current snapshot");
-            string url = $"{FlaskAppBaseUrl}/raw_snapshot"; // Uses the app base URL
+            string url = $"{FlaskAppBaseUrl}/backend_snapshot"; // Uses the app base URL
             try
             {
                 HttpResponseMessage response = await client.GetAsync(url);
@@ -120,7 +120,7 @@ namespace Frontend
                 using var image = Image.Load(imageBytes);
                 int width = image.Width;
                 int height = image.Height;
-                double scale = 0.75; // reduce to half size
+                double scale = 0.25; // reduce size
                 int newWidth = (int)(width * scale);
                 int newHeight = (int)(height * scale); 
 
@@ -174,7 +174,7 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"Highlight/ select objects. us as parameter teh name of the object. More objects are separated by a comma. ")]
+        [KernelFunction, Description(@"Highlight or select objects. Use as parameter the name of the object. More objects are separated by a comma.")]
         public async Task<string> SetObjectFilterAsync(string objectLabels)
         {
             string url = $"{FlaskApiBaseUrl}/set_object_filter";

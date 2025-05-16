@@ -335,14 +335,16 @@ def snapshot():
 
 @app.route('/raw_snapshot')
 def raw_snapshot():
-    """Returns a single JPEG snapshot directly from the configured source (no threads)."""
-    logger.debug("Raw snapshot: Attempting direct capture from configured source.")
+    """Returns a single JPEG snapshot directly from the currently selected source (no threads)."""
+    logger.debug("Raw snapshot: Attempting direct capture from current detection system source.")
     
     cap = None
-    source_to_open = RTSP_STREAM_URL # From config.py
+    # Use the current source from detection_system, not the static config
+    source_to_open = str(getattr(detection_system, 'source_identifier', RTSP_STREAM_URL))
+    source_type = getattr(detection_system, 'source_type', None)
     is_device = False
 
-    if source_to_open.isdigit():
+    if source_type == 'device' or (source_to_open.isdigit() and source_type is None):
         try:
             device_index = int(source_to_open)
             logger.debug(f"Raw snapshot: Source is device index {device_index}.")
@@ -355,8 +357,8 @@ def raw_snapshot():
     
     if not is_device: # Either it wasn't a digit, or parsing as int failed
         if not source_to_open:
-            logger.error("Raw snapshot: Video source URL is empty in config.")
-            return ("Video source URL is empty", 503)
+            logger.error("Raw snapshot: Video source string is empty.")
+            return ("Video source string is empty", 503)
         logger.debug(f"Raw snapshot: Source is URL '{source_to_open}'. Attempting with FFMPEG backend.")
         # For RTSP or file paths, FFMPEG is generally a good choice
         cap = cv2.VideoCapture(source_to_open, cv2.CAP_FFMPEG)
@@ -379,6 +381,40 @@ def raw_snapshot():
     
     logger.debug(f"Raw snapshot: Returning JPEG image from {source_to_open}.")
     return Response(buf.tobytes(), mimetype='image/jpeg')
+
+@app.route('/backend_snapshot')
+def backend_snapshot():
+    """Returns a single JPEG snapshot, preferring the annotated frame, then raw frame."""
+    if not detection_system.is_running():
+        logger.warning("backend_snapshot: Detection system not running.")
+        return ("Detection system not running", 503)
+
+    logger.debug("Backend snapshot: Retrieving frame from detection_system.")
+    frame_to_send = None
+    
+    # Try to get the annotated frame first
+    annotated_frame = detection_system.get_latest_annotated_frame()
+    if annotated_frame is not None:
+        logger.debug("Backend snapshot: Using latest annotated frame.")
+        frame_to_send = annotated_frame
+    else:
+        logger.debug("Backend snapshot: Annotated frame not available, trying latest raw frame.")
+        raw_frame = detection_system.get_latest_frame()
+        if raw_frame is not None:
+            logger.debug("Backend snapshot: Using latest raw frame.")
+            frame_to_send = raw_frame
+
+    if frame_to_send is None:
+        logger.info("Backend snapshot: No frame available (neither annotated nor raw).")
+        return ("No frame available", 503)
+
+    ret, buffer = cv2.imencode('.jpg', frame_to_send)
+    if not ret:
+        logger.error("Backend snapshot: Error encoding frame.")
+        return ("Error encoding frame", 500)
+    
+    logger.debug("Backend snapshot: Returning JPEG image.")
+    return Response(buffer.tobytes(), mimetype='image/jpeg')
 
 # Add API endpoints in app.py
 @app.route('/api/toggle_tracking', methods=['POST'])

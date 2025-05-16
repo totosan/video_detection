@@ -24,15 +24,17 @@ public class Program
     public static async Task Main(string[] args)
     {
         // Load environment variables from .env file
-        Env.Load();
+        DotNetEnv.Env.Load("/Users/toto/Projects/JetsonNano/ai-video-solution/Frontend/.env");
 
         // Determine if running in online mode (using OpenAI) or Hugging Face
         bool useOpenAI = args.Contains("-online");
         bool useHuggingFace = args.Contains("-huggingface");
 
         // Configure these to your Ollama setup
+        //var ollamaMode_text_lId = "smollm2:latest"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaMode_text_lId = "llama3.2"; // Or your preferred model, e.g., "mistral", "phi3"
-        var ollamaMode_vision_lId = "gemma3:4b";//-it-qat"; // Or your preferred model, e.g., "mistral", "phi3"
+        var ollamaMode_vision_lId = "moondream:latest"; // Or your preferred model, e.g., "mistral", "phi3"
+        //var ollamaMode_vision_lId = "llava-phi3:latest"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaBaseUrl = new Uri("http://localhost:11434"); // Default Ollama API endpoint
 
         // Configure these for your OpenAI setup
@@ -41,7 +43,7 @@ public class Program
         var openAIApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
 
         // Configure these for your Hugging Face setup
-        var huggingFaceModelId = "google/gemma-2-9b-it"; // Or your preferred model
+        var huggingFaceModelId = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"; // Or your preferred model
         var huggingFaceApiKey = Environment.GetEnvironmentVariable("HUGGINGFACE_API_KEY");
 
         if (useOpenAI && string.IsNullOrEmpty(openAIApiKey))
@@ -82,7 +84,7 @@ public class Program
         }
 
         // Add Hugging Face Chat Completion if using HuggingFace and API key is present
-        if (useHuggingFace && !string.IsNullOrEmpty(huggingFaceApiKey))
+        if (useHuggingFace /*&& !string.IsNullOrEmpty(huggingFaceApiKey)*/)
         {
             builder.AddHuggingFaceChatCompletion(
                 model: huggingFaceModelId,
@@ -114,8 +116,8 @@ public class Program
         var settingsHuggingFace = new HuggingFacePromptExecutionSettings { ServiceId = "huggingFace" }; // FunctionChoiceBehavior not available
 
         // Retrieve the chat completion service
-        var chatCompletionService = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaTxt");
-        var chatCompletionServiceVis = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaVis");
+        var chatCompletionServiceOllamaTxt = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaTxt");
+        var chatCompletionServiceOllamaVis = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaVis");
         IChatCompletionService? chatCompletionServiceOpenAI = null; // Initialize as nullable
         if (useOpenAI && !string.IsNullOrEmpty(openAIApiKey)) // Only retrieve if it should have been added
         {
@@ -123,14 +125,14 @@ public class Program
         }
 
         IChatCompletionService? chatCompletionServiceHuggingFace = null; // Initialize as nullable
-        if (useHuggingFace && !string.IsNullOrEmpty(huggingFaceApiKey)) // Only retrieve if it should have been added
+        if (useHuggingFace /*&& !string.IsNullOrEmpty(huggingFaceApiKey)*/) // Only retrieve if it should have been added
         {
             chatCompletionServiceHuggingFace = kernel.Services.GetKeyedService<IChatCompletionService>("huggingFace");
         }
 
 
         // Create the plugin once, as it's used by both OpenAI and Ollama (Txt)
-        var pluginsObjectDetection = KernelPluginFactory.CreateFromObject(new Tools(chatCompletionServiceVis), "objectDetection");
+        var pluginsObjectDetection = KernelPluginFactory.CreateFromObject(new Tools(chatCompletionServiceOllamaVis), "objectDetection");
 
         IChatCompletionService activeChatService;
         PromptExecutionSettings? activeSettings;
@@ -147,16 +149,17 @@ public class Program
         else if (useHuggingFace && chatCompletionServiceHuggingFace != null) // Check if Hugging Face service was successfully retrieved
         {
             Console.WriteLine("Using Hugging Face API.");
-            activeChatService = chatCompletionServiceHuggingFace;
-            activeSettings = settingsHuggingFace;
-            var kernelHf = kernel.Clone(); // Clone the kernel for HuggingFace-specific plugins/config
-            kernelHf.Plugins.Add(pluginsObjectDetection); // Add plugins to the cloned kernel for HuggingFace
-            activeKernel = kernelHf;
+            Console.WriteLine("Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            activeChatService = chatCompletionServiceOllamaTxt; // Default to Ollama text
+            activeSettings = settingsTxt;
+            var kernelTxt = kernel.Clone(); // Clone the kernel for Ollama-specific plugins
+            kernelTxt.Plugins.Add(pluginsObjectDetection); // Add plugins to the cloned kernel for Ollama Txt
+            activeKernel = kernelTxt; 
         }
         else
         {
             Console.WriteLine("Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
-            activeChatService = chatCompletionService; // Default to Ollama text
+            activeChatService = chatCompletionServiceOllamaTxt; // Default to Ollama text
             activeSettings = settingsTxt;
             var kernelTxt = kernel.Clone(); // Clone the kernel for Ollama-specific plugins
             kernelTxt.Plugins.Add(pluginsObjectDetection); // Add plugins to the cloned kernel for Ollama Txt
@@ -168,12 +171,13 @@ public class Program
         var chatHistory = new ChatHistory("""
         You are an assistant that can help the user with video analysis.
         You are able to detect objects in a video stream and provide a detailed description of the visual data. 
-        You are also able to analyze the request from the user and identify the intent of the user. 
-        You are able to decide which agent should act next. You are able to get current detections of objects in a video stream, get the current systems state, and get snapshots of the video stream.
+        You are able to differentiate between specific object detection and general visual analysis.
+        You are able to get current detections of objects in a video stream, get the current systems state, and get snapshots of the video stream.
         DON'T provide solutions; focus only on answering the question in a human way.
         DON'T provide any code or technical details.
         DON'T provide any explanations or extra text.
         DO NOT ask for clarifications.
+
         """);
 
         while (true)
