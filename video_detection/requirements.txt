@@ -1,0 +1,4 @@
+dotenv
+flask
+lap>=0.5.12
+numpy==1.23.5

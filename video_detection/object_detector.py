@@ -11,7 +11,7 @@ import platform # Import platform module
 logger = logging.getLogger(__name__)
 
 # --- Configuration ---
-FRAME_SKIP_FACTOR = 2 # Process every Nth frame (e.g., 2 means process 1, skip 1, process 1, ...)
+FRAME_SKIP_FACTOR = 0 # Process every Nth frame (e.g., 2 means process 1, skip 1, process 1, ...)
 # -------------------
 
 class ObjectDetector:
@@ -165,6 +165,7 @@ class ObjectDetector:
             "persist": True,  # Important for tracking across skipped frames
             "verbose": False,
             "conf": 0.25,
+            "vid_stride":3,
             "device": self.device
         }
         if self.tracker_config_path:

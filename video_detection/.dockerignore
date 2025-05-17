@@ -1,0 +1,5 @@
+*try_*
+core
+*.sh
+*.pt
+*.venv

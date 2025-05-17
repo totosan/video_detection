@@ -9,4 +9,5 @@ dependencies = [
     "flask>=3.1.0",
     "lap>=0.5.12",
     "ultralytics>=8.3.127",
+    "numpy==1.23.5",
 ]
