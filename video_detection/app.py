@@ -11,6 +11,7 @@ import atexit # To ensure cleanup on exit
 import collections # Import collections for deque type checking
 import base64 # Import base64 for image encoding
 import signal
+import io # Added for image byte handling
 
 # Import static config and the new system manager
 from config import STATIC_FOLDER, TEMPLATE_FOLDER, RTSP_STREAM_URL # Only import static config
@@ -458,6 +459,63 @@ def get_object_filter():
     except Exception as e:
         logger.exception("API: Error getting object filter")
         return jsonify({"error": "Failed to get object filter"}), 500
+
+# --- API Endpoint for Single Image Detection ---
+@app.route('/api/detect', methods=['POST'])
+def api_detect_objects():
+    """
+    API endpoint to detect objects in an uploaded image.
+    Expects a POST request with 'multipart/form-data' encoding.
+    The image file should be sent under the form field name 'image'.
+    Supported image formats are those decodable by OpenCV (e.g., JPEG, PNG).
+    Returns a JSON response with a list of detected objects.
+    Each object in the list is a dictionary, e.g.:
+    {'box': [x_min, y_min, x_max, y_max], 'label': 'person', 'confidence': 0.9}
+    """
+    if 'image' not in request.files:
+        logger.warning("API /api/detect: No 'image' field found in request.files. Ensure the image is sent as multipart/form-data under the field name 'image'.")
+        return jsonify({"error": "No image file provided in 'image' field"}), 400
+
+    file = request.files['image']
+    if file.filename == '':
+        logger.warning("API /api/detect: No image file selected (filename is empty).")
+        return jsonify({"error": "No image file selected"}), 400
+
+    try:
+        image_bytes = file.read()
+        # Convert image bytes to OpenCV image
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img_np is None:
+            logger.error("API /api/detect: Could not decode image. Ensure it's a valid image format (e.g., JPEG, PNG).")
+            return jsonify({"error": "Could not decode image. Invalid or unsupported image format."}), 400
+
+        logger.info(f"API /api/detect: Processing uploaded image '{file.filename}' of shape {img_np.shape}, size {len(image_bytes)} bytes.")
+
+        # Assume detection_system has a method `process_single_image`
+        # This method should take an image (numpy array) and return detection results
+        # The results should be a list of dictionaries, similar to get_current_detections_data
+        # e.g., [{'box': [x,y,w,h], 'label': 'person', 'confidence': 0.9}, ...]
+        
+        # For now, we'll call a placeholder method. You'll need to implement this
+        # in your DetectionSystem class.
+        # Example: detections = detection_system.process_single_image(img_np)
+        
+        # Placeholder for the actual call to detection_system
+        # Replace this with your actual detection logic call
+        if hasattr(detection_system, 'process_single_image'):
+            detections = detection_system.process_single_image(img_np)
+            logger.info(f"API /api/detect: Detected {len(detections)} objects in '{file.filename}'.")
+            return jsonify({"detections": detections}), 200
+        else:
+            logger.error("API /api/detect: `process_single_image` method not found in DetectionSystem.")
+            return jsonify({"error": "Detection functionality for single images not implemented in the backend."}), 501
+
+    except Exception as e:
+        logger.exception("API /api/detect: Error processing image for detection")
+        return jsonify({"error": "Failed to process image for detection", "details": str(e)}), 500
+# ---------------------------------------------
 
 # --- Graceful Shutdown --- 
 def cleanup_on_exit():

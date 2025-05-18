@@ -31,10 +31,16 @@ class DetectionSystem:
         self.yolo_model_path_config = YOLO_MODEL_PATH
         self.max_track_points = MAX_TRACK_POINTS
 
-        # --- Determine Source Type and Identifier ---
+        # --- Mode Configuration ---
+        self.single_image_mode = not bool(self.rtsp_stream_url_config)
+        if self.single_image_mode:
+            logger.info("No RTSP_STREAM_URL configured. DetectionSystem will operate in single image mode.")
+
+        # --- Determine Source Type and Identifier (only if not in single image mode) ---
         self.source_identifier = None
         self.source_type = None # "rtsp" or "device"
-        self._set_source_from_config(self.rtsp_stream_url_config) # Use a helper
+        if not self.single_image_mode:
+            self._set_source_from_config(self.rtsp_stream_url_config) # Use a helper
         # ---------------------------------------------
 
         # --- Determine Model Path based on TensorRT/CUDA availability ---
@@ -342,6 +348,14 @@ class DetectionSystem:
 
     # --- Lifecycle Management ---
     def start(self):
+        if self.single_image_mode:
+            logger.info("DetectionSystem is in single image mode. Workers will not be started.")
+            # Ensure model is loaded, as it's needed for process_single_image
+            if not hasattr(self, 'model') or self.model is None:
+                logger.error("Model not loaded in single image mode. This should not happen if __init__ completed.")
+                raise RuntimeError("Model not loaded, cannot operate in single image mode.")
+            return # Do not start workers
+
         if self.frame_grabber or self.object_detector or self.annotation_worker:
             logger.warning("Detection system already running or not properly stopped. Attempting to stop first.")
             self.stop() # Ensure a clean stop before trying to start again.
@@ -536,4 +550,59 @@ class DetectionSystem:
     def get_object_filter(self):
         """Get the current object filter."""
         return getattr(self, 'object_filter', None)
+
+    def process_single_image(self, image_np):
+        """
+        Processes a single image for object detection.
+
+        Args:
+            image_np (np.ndarray): The image to process (OpenCV format, BGR).
+
+        Returns:
+            list: A list of detection dictionaries, e.g.,
+                  [{'box': [x_min, y_min, x_max, y_max], 'label': 'person', 'confidence': 0.9}, ...]
+        """
+        if not hasattr(self, 'model') or self.model is None:
+            logger.error("YOLO model not loaded. Cannot process single image.")
+            return []
+
+        logger.info(f"Processing single image of shape {image_np.shape}")
+        try:
+            # Perform detection
+            # The results object from YOLO might vary slightly depending on the task (detect, track, etc.)
+            # For simple detection, it's usually a list of Results objects.
+            results = self.model.predict(source=image_np, verbose=False) # verbose=False to reduce console output
+
+            serializable_detections = []
+            if results and isinstance(results, list): # results is a list of Results objects
+                for res in results: # Iterate through each Results object (usually one for a single image)
+                    if hasattr(res, "boxes") and res.boxes is not None:
+                        boxes = res.boxes.xyxyn.cpu().numpy()  # Normalized [x_min, y_min, x_max, y_max]
+                        confs = res.boxes.conf.cpu().numpy()
+                        clss = res.boxes.cls.cpu().numpy()
+                        
+                        img_height, img_width = image_np.shape[:2]
+
+                        for i in range(len(boxes)):
+                            box_normalized = boxes[i]
+                            # Denormalize box coordinates
+                            x_min = float(box_normalized[0] * img_width)
+                            y_min = float(box_normalized[1] * img_height)
+                            x_max = float(box_normalized[2] * img_width)
+                            y_max = float(box_normalized[3] * img_height)
+                            
+                            conf = float(confs[i])
+                            cls_idx = int(clss[i])
+                            label = self.model.names[cls_idx] if cls_idx < len(self.model.names) else "unknown"
+
+                            serializable_detections.append({
+                                "box": [x_min, y_min, x_max, y_max], # Standard [x_min, y_min, x_max, y_max]
+                                "label": label,
+                                "confidence": conf
+                            })
+            logger.info(f"Detected {len(serializable_detections)} objects in the single image.")
+            return serializable_detections
+        except Exception as e:
+            logger.exception("Error during single image processing")
+            return []
 
