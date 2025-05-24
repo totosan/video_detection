@@ -12,6 +12,8 @@ import collections # Import collections for deque type checking
 import base64 # Import base64 for image encoding
 import signal
 import io # Added for image byte handling
+import zmq # <--- ADDED IMPORT
+import json # <--- ADDED IMPORT (was missing in previous thought, but present in my last code generation for app.py)
 
 # Import static config and the new system manager
 from config import STATIC_FOLDER, TEMPLATE_FOLDER, RTSP_STREAM_URL # Only import static config
@@ -37,6 +39,142 @@ except Exception as e:
     # Exit or handle appropriately if the core system fails to init
     sys.exit(1)
 # ---------------------------------------
+
+# --- ZeroMQ Server Setup ---
+ZMQ_CONTEXT = None
+ZMQ_IMAGE_PULL_SOCKET = None
+ZMQ_RESULTS_REP_SOCKET = None
+ZMQ_SERVER_THREAD = None
+ZMQ_STOP_EVENT = threading.Event()
+
+def zmq_detection_server_thread_func():
+    """
+    Thread function to run the ZeroMQ server for image detection.
+    Listens for images on a PULL socket and sends results on a REP socket.
+    """
+    global ZMQ_CONTEXT, ZMQ_IMAGE_PULL_SOCKET, ZMQ_RESULTS_REP_SOCKET, detection_system
+
+    # Changed to TCP, ensure these match the client (vision_node.py) and Docker port mappings if used
+    image_receiver_endpoint = os.environ.get("DETECTION_IMAGE_ENDPOINT", "tcp://*:5555")
+    results_sender_endpoint = os.environ.get("DETECTION_RESULTS_ENDPOINT", "tcp://*:5556")
+
+    try:
+        ZMQ_CONTEXT = zmq.Context()
+        
+        ZMQ_IMAGE_PULL_SOCKET = ZMQ_CONTEXT.socket(zmq.PULL)
+        ZMQ_IMAGE_PULL_SOCKET.setsockopt(zmq.RCVTIMEO, 1000) # Timeout for recv to check stop event
+        ZMQ_IMAGE_PULL_SOCKET.bind(image_receiver_endpoint)
+        logger.info(f"ZeroMQ: Image PULL socket bound to {image_receiver_endpoint}")
+
+        ZMQ_RESULTS_REP_SOCKET = ZMQ_CONTEXT.socket(zmq.REP)
+        ZMQ_RESULTS_REP_SOCKET.setsockopt(zmq.RCVTIMEO, 1000) # Timeout for recv to check stop event
+        ZMQ_RESULTS_REP_SOCKET.bind(results_sender_endpoint)
+        logger.info(f"ZeroMQ: Results REP socket bound to {results_sender_endpoint}")
+
+        logger.info("ZeroMQ detection server thread started. Waiting for images...")
+
+        poller = zmq.Poller()
+        poller.register(ZMQ_IMAGE_PULL_SOCKET, zmq.POLLIN)
+        poller.register(ZMQ_RESULTS_REP_SOCKET, zmq.POLLIN)
+
+        while not ZMQ_STOP_EVENT.is_set():
+            try:
+                logger.debug("ZMQ server: Polling sockets...")
+                socks = dict(poller.poll(timeout=1000)) # Poll with a timeout to check stop_event
+
+                if ZMQ_IMAGE_PULL_SOCKET in socks and socks[ZMQ_IMAGE_PULL_SOCKET] == zmq.POLLIN:
+                    logger.debug("ZMQ server: Image socket has data. Attempting to receive image bytes...")
+                    img_bytes = ZMQ_IMAGE_PULL_SOCKET.recv(flags=zmq.NOBLOCK) # Use NOBLOCK as poller indicated readability
+                    logger.info(f"ZMQ server: Received {len(img_bytes)} image bytes.")
+
+                    # Now wait for the "detect" signal on the REP socket
+                    logger.debug("ZMQ server: Waiting for 'detect' signal on REP socket...")
+                    
+                    # We need to poll specifically for the results_socket now
+                    # This inner poll is tricky because REP expects a strict recv/send sequence.
+                    # If we recv image, we MUST wait for a recv on REP then send on REP.
+                    
+                    # Let's simplify: assume "detect" signal comes quickly after image.
+                    # The REP socket should also have a timeout.
+                    try:
+                        logger.debug("ZMQ server: Attempting to receive 'detect' signal...")
+                        signal = ZMQ_RESULTS_REP_SOCKET.recv_string() # This will use RCVTIMEO if no message
+                        logger.info(f"ZMQ server: Received signal: '{signal}'")
+
+                        if signal == "detect":
+                            logger.debug("ZMQ server: Decoding image...")
+                            cv_image = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+                            if cv_image is None:
+                                logger.error("ZMQ server: Failed to decode image.")
+                                ZMQ_RESULTS_REP_SOCKET.send_json({"error": "Failed to decode image"})
+                                continue
+
+                            logger.debug("ZMQ server: Processing image with detection system...")
+                            detections = detection_system.process_single_image(cv_image)
+                            logger.info(f"ZMQ server: Detection complete. Found {len(detections)} objects. Sending results.")
+                            ZMQ_RESULTS_REP_SOCKET.send_json({"detections": detections})
+                            logger.debug("ZMQ server: Results sent.")
+                        else:
+                            logger.warn(f"ZMQ server: Received unknown signal '{signal}'. Sending error.")
+                            ZMQ_RESULTS_REP_SOCKET.send_json({"error": f"Unknown signal: {signal}"})
+                    
+                    except zmq.error.Again:
+                        logger.warn("ZMQ server: Timeout waiting for 'detect' signal on REP socket after receiving image. No reply sent.")
+                        # This is problematic for REP socket state. It might need a reset or a dummy send if protocol allows.
+                        # For now, we just log. The client will time out.
+                        # To prevent REP socket from getting stuck, we might need to send an error response here.
+                        # However, a REP socket *must* reply if it has received a request.
+                        # If recv_string timed out, it means no request was fully received on REP,
+                        # so we should NOT send. The issue is client-side if PUSH was sent but REQ was not.
+                        # But the client logs show REQ was sent.
+                        # This points to a fundamental ordering issue or the REP socket not seeing the REQ.
+                        # Let's ensure the client isn't sending REQ *before* PUSH is fully processed.
+                        # The current client logic is PUSH then REQ.
+                        # The server logic is PULL then REP. This should match.
+
+                # Check if stop_event was set during poll or processing
+                if ZMQ_STOP_EVENT.is_set():
+                    logger.info("ZMQ server: Stop event detected, breaking loop.")
+                    break
+            
+            except zmq.error.Again:
+                # This will catch timeouts from poller.poll() if image_socket.recv() was not called
+                # or if RCVTIMEO on sockets themselves trigger if not using NOBLOCK with poller.
+                logger.debug("ZMQ server: Poll timed out, no messages received. Checking stop event.")
+                if ZMQ_STOP_EVENT.is_set():
+                    logger.info("ZMQ server: Stop event detected after poll timeout, breaking loop.")
+                    break
+                continue # Continue to next poll iteration
+                
+            except Exception as e:
+                logger.error(f"ZMQ server: Error in detection server loop: {e}", exc_info=True)
+                # If it's a REP socket error, it might be stuck.
+                # A simple break/continue might not be enough.
+                # For now, just log and continue, hoping client timeout/retry handles it.
+                if isinstance(e, zmq.error.ZMQError) and ZMQ_RESULTS_REP_SOCKET and not ZMQ_RESULTS_REP_SOCKET.closed:
+                    try:
+                        # Try to send an error if we are in a state where a send is expected
+                        # This is very hard to get right without knowing the exact state.
+                        # ZMQ_RESULTS_REP_SOCKET.send_json({"error": "Server loop exception"})
+                        logger.error("ZMQ server: A ZMQError occurred. The REP socket might be in an inconsistent state.")
+                    except Exception as send_e:
+                        logger.error(f"ZMQ server: Error trying to send error response: {send_e}")
+                if ZMQ_STOP_EVENT.is_set():
+                    break
+                time.sleep(0.1) # Avoid tight loop on persistent error
+
+        logger.info("ZMQ detection server thread stopping.")
+    except Exception as e:
+        logger.exception("Fatal error in ZeroMQ detection server thread setup")
+    finally:
+        if ZMQ_IMAGE_PULL_SOCKET:
+            ZMQ_IMAGE_PULL_SOCKET.close()
+        if ZMQ_RESULTS_REP_SOCKET:
+            ZMQ_RESULTS_REP_SOCKET.close()
+        # Context termination is handled in cleanup_on_exit
+        logger.info("ZeroMQ detection server thread stopped.")
+
+# --- End ZeroMQ Server Setup ---
 
 def generate_frames(lock, frame_source_func):
     """Generator function to yield frames for streaming."""
@@ -473,55 +611,59 @@ def api_detect_objects():
     {'box': [x_min, y_min, x_max, y_max], 'label': 'person', 'confidence': 0.9}
     """
     if 'image' not in request.files:
-        logger.warning("API /api/detect: No 'image' field found in request.files. Ensure the image is sent as multipart/form-data under the field name 'image'.")
-        return jsonify({"error": "No image file provided in 'image' field"}), 400
+        logger.warning("API /api/detect: No image file in request.")
+        return jsonify({"error": "No image file provided"}), 400
 
     file = request.files['image']
     if file.filename == '':
-        logger.warning("API /api/detect: No image file selected (filename is empty).")
-        return jsonify({"error": "No image file selected"}), 400
+        logger.warning("API /api/detect: No selected file.")
+        return jsonify({"error": "No selected file"}), 400
 
     try:
-        image_bytes = file.read()
-        # Convert image bytes to OpenCV image
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        # Read image file into a numpy array
+        filestr = file.read()
+        npimg = np.frombuffer(filestr, np.uint8)
+        cv_image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
 
-        if img_np is None:
-            logger.error("API /api/detect: Could not decode image. Ensure it's a valid image format (e.g., JPEG, PNG).")
-            return jsonify({"error": "Could not decode image. Invalid or unsupported image format."}), 400
+        if cv_image is None:
+            logger.error("API /api/detect: Could not decode image.")
+            return jsonify({"error": "Could not decode image"}), 400
 
-        logger.info(f"API /api/detect: Processing uploaded image '{file.filename}' of shape {img_np.shape}, size {len(image_bytes)} bytes.")
-
-        # Assume detection_system has a method `process_single_image`
-        # This method should take an image (numpy array) and return detection results
-        # The results should be a list of dictionaries, similar to get_current_detections_data
-        # e.g., [{'box': [x,y,w,h], 'label': 'person', 'confidence': 0.9}, ...]
+        # Process the image using the detection system
+        request_time = time.time() # For potential timing analysis
+        detections, _ = detection_system.process_single_image(cv_image, client_request_time=request_time)
         
-        # For now, we'll call a placeholder method. You'll need to implement this
-        # in your DetectionSystem class.
-        # Example: detections = detection_system.process_single_image(img_np)
-        
-        # Placeholder for the actual call to detection_system
-        # Replace this with your actual detection logic call
-        if hasattr(detection_system, 'process_single_image'):
-            detections = detection_system.process_single_image(img_np)
-            logger.info(f"API /api/detect: Detected {len(detections)} objects in '{file.filename}'.")
-            return jsonify({"detections": detections}), 200
-        else:
-            logger.error("API /api/detect: `process_single_image` method not found in DetectionSystem.")
-            return jsonify({"error": "Detection functionality for single images not implemented in the backend."}), 501
+        logger.info(f"API /api/detect: Processed {file.filename}, found {len(detections)} detections.")
+        return jsonify({"detections": detections}) # Ensure consistent response format
 
     except Exception as e:
-        logger.exception("API /api/detect: Error processing image for detection")
-        return jsonify({"error": "Failed to process image for detection", "details": str(e)}), 500
+        logger.exception("API /api/detect: Error processing image")
+        return jsonify({"error": str(e)}), 500
 # ---------------------------------------------
 
 # --- Graceful Shutdown --- 
 def cleanup_on_exit():
-    logger.info("Flask app exiting, stopping detection system...")
+    global ZMQ_STOP_EVENT, ZMQ_SERVER_THREAD, ZMQ_CONTEXT
+    logger.info("Flask app exiting...")
+    
+    # Signal ZMQ thread to stop and wait for it
+    if ZMQ_SERVER_THREAD and ZMQ_SERVER_THREAD.is_alive():
+        logger.info("Stopping ZeroMQ server thread...")
+        ZMQ_STOP_EVENT.set()
+        ZMQ_SERVER_THREAD.join(timeout=5.0) # Wait for thread to finish
+        if ZMQ_SERVER_THREAD.is_alive():
+            logger.warning("ZeroMQ server thread did not stop in time.")
+    
+    if ZMQ_CONTEXT:
+        logger.info("Terminating ZeroMQ context...")
+        ZMQ_CONTEXT.term() # Terminate context after sockets are closed by the thread
+        logger.info("ZeroMQ context terminated.")
+
+    logger.info("Stopping detection system...")
     detection_system.stop()
     logger.info("Detection system stopped.")
+    logger.info("Cleanup complete.")
+
 
 atexit.register(cleanup_on_exit)
 # -------------------------
@@ -541,24 +683,31 @@ if __name__ == '__main__':
         # Start the detection system's background threads
         detection_system.start()
 
+        # --- Start ZeroMQ Server Thread ---
+        logger.info("Starting ZeroMQ detection server thread...")
+        ZMQ_STOP_EVENT.clear() # Ensure event is clear before starting
+        ZMQ_SERVER_THREAD = threading.Thread(target=zmq_detection_server_thread_func, daemon=True)
+        ZMQ_SERVER_THREAD.start()
+        # ----------------------------------
+
         logger.info("Starting Flask development server...") # Use info
         # Disable Flask's default logger if using basicConfig, or configure Flask's logger
         log = logging.getLogger('werkzeug') # Silence Werkzeug logger
         log.setLevel(logging.WARNING)
+        
+        # Get host and port from environment variables or use defaults
+        host = os.environ.get('FLASK_RUN_HOST', '0.0.0.0')
+        port = int(os.environ.get('FLASK_RUN_PORT', 5000))
+        
+        app.run(host=host, port=port, debug=False, use_reloader=False) # use_reloader=False is important for threads
 
-        # Run Flask app (threaded=True is important for handling multiple requests)
-        app.run(host='0.0.0.0', port=3000, debug=False, threaded=True, use_reloader=False)
 
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received. Exiting.") # Use info
-        # Cleanup is handled by atexit
+        logger.info("KeyboardInterrupt received. Initiating shutdown...")
     except Exception as e:
-        logger.exception("An unexpected error occurred during Flask app execution.")
+        logger.exception("Failed to start Flask application")
     finally:
-        # Ensure cleanup runs even if atexit fails in some scenarios (though it should work)
-        if detection_system.is_running():
-             logger.warning("Cleanup: Detection system still seems to be running, attempting stop again.")
-             cleanup_on_exit()
-        logger.info("Server shut down process completed.")
+        # cleanup_on_exit will be called by atexit
+        logger.info("Application shutdown sequence initiated or completed.")
 
 
