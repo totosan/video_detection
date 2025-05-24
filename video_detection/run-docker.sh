@@ -1,16 +1,5 @@
 #! /bin/bash
 
-# Usage: ./run-docker.sh <video_source>
-# Example: ./run-docker.sh /dev/video0
-#          ./run-docker.sh "rtsp://user:pass@host:port/path"
-
-if [ -z "$1" ]; then
-  echo "Usage: $0 <video_source>"
-  echo "Example: $0 /dev/video0"
-  echo "         $0 \"rtsp://user:pass@host:port/path\""
-  exit 1
-fi
-
 VIDEO_URL=$1
 
 docker run --rm --runtime nvidia \

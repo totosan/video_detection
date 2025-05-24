@@ -1,0 +1,1 @@
+docker build . --no-cache -f ./Docker/Dockerfile -t yolo_detection:latest --progress plain
