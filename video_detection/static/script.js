@@ -173,57 +173,149 @@ async function fetchAndDrawDetections() {
     try {
         const response = await fetch(API_ENDPOINTS.CURRENT_DETECTIONS);
         if (!response.ok) {
-            console.error("Failed to fetch detections:", response.statusText);
+            console.error("Failed to fetch detections:", response.status, response.statusText);
+            try {
+                const errorData = await response.json();
+                console.error("Error data from API:", errorData);
+            } catch (e) {
+                // Ignore if error response is not JSON
+            }
             requestAnimationFrame(fetchAndDrawDetections); // Try again on next frame
             return;
         }
         const data = await response.json();
 
+        console.log("Received detections data:", JSON.stringify(data, null, 2)); // Log the full data structure
+
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        if (!data.detections || data.detections.length === 0) {
+        // Validate the structure of the received data
+        if (!data || typeof data !== 'object') {
+            console.error("API response data is missing or not an object.");
+            requestAnimationFrame(fetchAndDrawDetections);
+            return;
+        }
+
+        if (!Array.isArray(data.detections)) {
+            console.error("API response 'data.detections' is missing or not an array.");
+            requestAnimationFrame(fetchAndDrawDetections);
+            return;
+        }
+        
+        // data.frame_shape is expected to be [height, width] or null
+        
+        if (data.detections.length === 0) {
+            // console.log("No detections in this frame."); // Optional: less verbose log
             requestAnimationFrame(fetchAndDrawDetections); // Continue loop even if no detections
             return;
         }
 
-        // Ensure original frame dimensions are set (once)
-        if (!originalFrameWidth || !originalFrameHeight) {
-            originalFrameWidth = data.frame_width;
-            originalFrameHeight = data.frame_height;
+        // Update original frame dimensions if available and not yet set
+        if ((!originalFrameWidth || !originalFrameHeight) && 
+            data.frame_shape && 
+            Array.isArray(data.frame_shape) && 
+            data.frame_shape.length === 2) {
+            
+            originalFrameHeight = data.frame_shape[0]; // height
+            originalFrameWidth = data.frame_shape[1];  // width
+
+            if (originalFrameHeight <= 0 || originalFrameWidth <= 0) {
+                console.warn(`Received frame_shape with zero or negative dimension: [${originalFrameHeight}, ${originalFrameWidth}]. Will use canvas size as fallback for scaling.`);
+                originalFrameHeight = null; // Reset to allow fallback
+                originalFrameWidth = null;  // Reset to allow fallback
+            }
         }
         
-        // Prevent division by zero if frame dimensions are not yet available or are zero
-        const scaleX = canvas.width / (originalFrameWidth || 1);
-        const scaleY = canvas.height / (originalFrameHeight || 1);
+        // Determine scaling factors. Fallback to canvas dimensions if original dimensions are unknown or invalid.
+        const baseWidthForScale = (originalFrameWidth && originalFrameWidth > 0) ? originalFrameWidth : canvas.width;
+        const baseHeightForScale = (originalFrameHeight && originalFrameHeight > 0) ? originalFrameHeight : canvas.height;
+
+        // Prevent division by zero if base dimensions are still zero (e.g. canvas not rendered yet, or invalid originalFrame values)
+        const scaleX = canvas.width / (baseWidthForScale || 1);
+        const scaleY = canvas.height / (baseHeightForScale || 1);
 
         data.detections.forEach(det => {
             // Use the global currentObjectFilter
             if (currentObjectFilter.length > 0 && !currentObjectFilter.includes(det.label)) {
-                return; // Skip if filter is active and label doesn"t match
+                return; // Skip if filter is active and label doesn\'t match
             }
 
-            const [x1, y1, x2, y2] = det.box;
+            const [x1, y1, x2, y2] = det.box; // Still useful for label positioning
             const label = det.label || "unknown";
             const color = det.color ? `rgb(${det.color[0]}, ${det.color[1]}, ${det.color[2]})` : "red";
+            const trackId = det.track_id || "unknown";
 
             const canvasX1 = x1 * scaleX;
             const canvasY1 = y1 * scaleY;
-            const canvasW = (x2 - x1) * scaleX;
-            const canvasH = (y2 - y1) * scaleY;
+            // const canvasW = (x2 - x1) * scaleX; // Not directly used for masks, but good for context
+            // const canvasH = (y2 - y1) * scaleY; // Not directly used for masks
 
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 2;
-            ctx.strokeRect(canvasX1, canvasY1, canvasW, canvasH);
+            // Check for segmentation mask data
+            // Assuming det.mask_points is an array of [x,y] normalized to 0-1 range
+            if (det.mask_points && Array.isArray(det.mask_points) && det.mask_points.length > 0) {
+                ctx.fillStyle = color.replace('rgb', 'rgba').replace(')', ', 0.5)'); // Semi-transparent fill
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
 
-            ctx.fillStyle = color;
-            const text = `${label} (ID: ${det.track_id || "unknown"})`;
-            ctx.font = "12px Arial";
-            const textMetrics = ctx.measureText(text);
-            const textHeight = 12; // Approximate height for "12px Arial"
-            ctx.fillRect(canvasX1, canvasY1 - textHeight - 4, textMetrics.width + 4, textHeight + 4);
+                ctx.beginPath();
+                // Scale normalized mask points by canvas dimensions directly
+                ctx.moveTo(det.mask_points[0][0] * canvas.width, det.mask_points[0][1] * canvas.height);
+                for (let i = 1; i < det.mask_points.length; i++) {
+                    if (Array.isArray(det.mask_points[i]) && det.mask_points[i].length === 2) {
+                        ctx.lineTo(det.mask_points[i][0] * canvas.width, det.mask_points[i][1] * canvas.height);
+                    } else {
+                        console.warn("Invalid point in mask_points array:", det.mask_points[i]);
+                    }
+                }
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+            } else {
+                // Fallback to drawing bounding box if no mask points or if mask_points is invalid
+                // Ensure det.box is valid before trying to draw
+                if (det.box && Array.isArray(det.box) && det.box.length === 4) {
+                    const [x1, y1, x2, y2] = det.box;
+                    const rectX = x1 * scaleX;
+                    const rectY = y1 * scaleY;
+                    const rectW = (x2 - x1) * scaleX;
+                    const rectH = (y2 - y1) * scaleY;
+                    
+                    // Only draw if width and height are positive
+                    if (rectW > 0 && rectH > 0) {
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(rectX, rectY, rectW, rectH);
+                    }
+                } else {
+                    console.warn("Fallback to bounding box: det.box is invalid", det.box);
+                }
+            }
 
-            ctx.fillStyle = "white";
-            ctx.fillText(text, canvasX1 + 2, canvasY1 - 4);
+            // Draw label (position based on the top-left of the bounding box)
+            // Ensure det.box is valid for label positioning as well
+            if (det.box && Array.isArray(det.box) && det.box.length === 4) {
+                const [x1, y1, , ] = det.box; // Only need x1, y1 for label anchor
+                const labelAnchorX = x1 * scaleX;
+                const labelAnchorY = y1 * scaleY;
+
+                ctx.fillStyle = color;
+                const text = `${label} (ID: ${trackId})`;
+                ctx.font = "12px Arial";
+                const textMetrics = ctx.measureText(text);
+                const textHeight = 12; // Approximate height for "12px Arial"
+                
+                // Ensure label is within canvas bounds
+                let labelX = labelAnchorX;
+                let labelY = labelAnchorY - textHeight - 4;
+                if (labelY < 0) labelY = labelAnchorY + textHeight + 4; // If too high, draw below
+                if (labelX + textMetrics.width + 4 > canvas.width) labelX = canvas.width - textMetrics.width - 4; // Adjust if too wide
+                if (labelX < 0) labelX = 0;
+
+
+                ctx.fillRect(labelX, labelY, textMetrics.width + 4, textHeight + 4);
+                ctx.fillStyle = "white";
+                ctx.fillText(text, labelX + 2, labelY + textHeight); // Adjusted y for fillText
+            }
         });
     } catch (error) {
         console.error("Error fetching or drawing detections:", error);

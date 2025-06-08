@@ -87,6 +87,10 @@ class DetectionSystem:
         try:
             self.model = YOLO(model_path_to_load)  # Load the determined YOLO model
             logger.info(f"Loaded YOLO model from {model_path_to_load}")
+            
+            # Check if this is a segmentation model
+            if "-seg" in model_path_to_load:
+                logger.info("Detected segmentation model! Object segmentation masks will be used.")
         except Exception as e:
             logger.exception(f"Failed to load YOLO model from {model_path_to_load}. Cannot initialize DetectionSystem.")
             raise  # Re-raise the exception to prevent system from starting incorrectly
@@ -262,65 +266,34 @@ class DetectionSystem:
 
     def get_tracked_objects_info(self):
         with self.detections_data_lock:
-            return self.latest_detections_data["tracked_objects_info"].copy() # Make a deep copy to be safe
+            # Ensure a deep copy if tracked_objects_info contains mutable objects like lists or dicts
+            # For now, assuming .copy() is sufficient if values are simple or immutable
+            return self.latest_detections_data["tracked_objects_info"].copy()
 
     def get_track_history(self):
         with self.detections_data_lock:
-            return self.latest_detections_data["track_history"].copy()
+            # Convert deques to lists for external use if they are stored as deques
+            history_copy = {k: list(v) if isinstance(v, deque) else v 
+                            for k, v in self.latest_detections_data["track_history"].items()}
+            return history_copy
 
     # --- New Getter for Current Detections ---
     def get_current_detections_data(self):
-        """Returns the latest raw detection results, frame shape, and track history."""
+        """Returns the latest processed detection results and frame shape for the API."""
         with self.detections_data_lock:
-            detections = self.latest_detections_data.get("results", [])
-            shape = self.latest_detections_data.get("frame_shape")
-            track_history_deques = self.latest_detections_data.get("track_history", {})
-            tracked_objects_info = self.latest_detections_data.get("tracked_objects_info", {})
+            # 'results' from latest_detections_data is now the list of serializable dicts
+            # prepared by ObjectDetector._detect_objects
+            serializable_detections = self.latest_detections_data.get("results", [])
+            frame_shape_tuple = self.latest_detections_data.get("frame_shape") # Expected (height, width)
 
-            frame_width = None
-            frame_height = None
-            if shape is not None and isinstance(shape, (tuple, list)) and len(shape) >= 2:
-                frame_height = shape[0]
-                frame_width = shape[1]
-
-            # Convert deques to lists for JSON serialization
-            track_history_lists = {
-                str(track_id): list(points)
-                for track_id, points in track_history_deques.items()
+            # The API endpoint in app.py expects a dictionary with 'detections' and 'frame_shape'
+            # The 'detections' list should already contain 'mask_points' if available.
+            response_data = {
+                "detections": serializable_detections if serializable_detections is not None else [],
+                "frame_shape": list(frame_shape_tuple) if frame_shape_tuple else None # Convert tuple to list for JSON
             }
-
-            # Serialize YOLO Results as per UI expectation
-            serializable_detections = []
-            if detections and hasattr(detections, "__getitem__"):
-                for det in detections:
-                    if hasattr(det, "boxes") and det.boxes is not None:
-                        boxes = det.boxes
-                        xyxy = boxes.xyxy.cpu().numpy()
-                        confs = boxes.conf.cpu().numpy()
-                        clss = boxes.cls.cpu().numpy()
-                        track_ids = boxes.id.cpu().numpy() if hasattr(boxes, "id") and boxes.id is not None else [None]*len(xyxy)
-                        for i in range(len(xyxy)):
-                            box = [float(x) for x in xyxy[i]]
-                            conf = float(confs[i])
-                            cls_idx = int(clss[i])
-                            track_id = int(track_ids[i]) if track_ids[i] is not None else None
-                            label = self.model.names[cls_idx] if cls_idx < len(self.model.names) else "unknown"
-                            # Color: try to get from tracked_objects_info, else fallback
-                            color = tracked_objects_info.get(track_id, {}).get('color', [(track_id or 0)*50%255, (track_id or 0)*80%255, (track_id or 0)*120%255])
-                            serializable_detections.append({
-                                "box": box,
-                                "conf": conf,
-                                "cls": cls_idx,
-                                "label": label,
-                                "track_id": track_id,
-                                "color": color
-                            })
-            return {
-                "detections": serializable_detections,
-                "frame_width": frame_width,
-                "frame_height": frame_height,
-                "track_history": track_history_lists
-            }
+            # logger.debug(f"DetectionSystem.get_current_detections_data is returning: {response_data}")
+            return response_data
     # -----------------------------------------
 
     # --- Backend Annotation Control ---

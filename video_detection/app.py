@@ -306,52 +306,97 @@ def set_selected_videosource():
 # --- New API Endpoint for Current Detections ---
 @app.route('/api/current_detections_light')
 def api_current_detections_light():
-    """API endpoint to get the latest raw detection results for client-side drawing."""
+    """API endpoint to get the latest raw detection results for client-side drawing.
+       This version is 'light' because it does not attempt to add cropped images.
+       It directly returns the serializable detections from the detection system.
+    """
     try:
-        data = detection_system.get_current_detections_data()
-        # Ensure detections is always a list, even if None initially
-        if data.get('detections') is None:
-            data['detections'] = []
+        # get_current_detections_data() in DetectionSystem should now return a dict like:
+        # {
+        #   'detections': list_of_serializable_detection_dicts, # (this list is what we want)
+        #   'frame_shape': (height, width),
+        #   'timestamp': ...
+        # }
+        # The serializable_detection_dicts are prepared by ObjectDetector._detect_objects
+        # and already include 'mask_points' if available.
+        
+        data_from_system = detection_system.get_current_detections_data()
+        
+        # The detections list is already prepared with box, label, color, track_id, and mask_points
+        detections_for_api = data_from_system.get('detections', [])
+        frame_shape_for_api = data_from_system.get('frame_shape', None)
 
-        return jsonify(data['detections'])  # Now contains JSON-serializable data and detection images
+        # The frontend expects a dictionary with a 'detections' key (list) and a 'frame_shape' key.
+        response_data = {
+            'detections': detections_for_api,
+            'frame_shape': frame_shape_for_api
+        }
+        
+        # Log for debugging what is being sent
+        # Be cautious with logging potentially large data structures in production
+        if detections_for_api:
+            # Log only the first detection or key fields to avoid overly verbose logs
+            # logger.debug(f"API /api/current_detections_light: Sending {len(detections_for_api)} detections. First detection keys: {detections_for_api[0].keys() if detections_for_api else 'N/A'}, Frame shape: {frame_shape_for_api}")
+            pass # Logging can be added here if needed for debugging
+
+        return jsonify(response_data)
     except Exception as e:
-        logger.exception("API: Error getting or serializing current detections data")
-        return jsonify({"error": "Failed to get current detections data"}), 500
+        logger.exception("API: Error getting or serializing current_detections_light data")
+        return jsonify({"error": "Failed to get current detections data", "detections": [], "frame_shape": None}), 500
 
 @app.route('/api/current_detections')
 def api_current_detections():
-    """API endpoint to get the latest raw detection results for client-side drawing."""
+    """API endpoint to get the latest raw detection results for client-side drawing,
+       including cropped images for each detection.
+    """
     try:
-        data = detection_system.get_current_detections_data()
-        # Ensure detections is always a list, even if None initially
-        if data.get('detections') is None:
-            data['detections'] = []
+        data_from_system = detection_system.get_current_detections_data()
+        
+        detections_for_api = data_from_system.get('detections', [])
+        frame_shape_for_api = data_from_system.get('frame_shape', None)
 
         # Add detection images (cropped regions) for each detection
-        detection_image = detection_system.get_latest_frame()
-        if detection_image is not None:
-            for detection in data['detections']:
+        # This part remains largely the same, but operates on the already prepared detections_for_api list
+        latest_frame_for_cropping = detection_system.get_latest_frame() # Get the full frame for cropping
+
+        if latest_frame_for_cropping is not None:
+            for detection in detections_for_api: # Iterate over the list of detection dicts
                 try:
                     box = detection.get('box')  # [x_min, y_min, x_max, y_max]
                     if box and len(box) == 4:
                         x_min, y_min, x_max, y_max = map(int, box)
-                        cropped_image = detection_image[y_min:y_max, x_min:x_max]
-                        ret, buffer = cv2.imencode('.jpg', cropped_image)
-                        if ret:
-                            detection['image'] = base64.b64encode(buffer).decode('utf-8')
+                        # Ensure coordinates are valid before cropping
+                        h, w = latest_frame_for_cropping.shape[:2]
+                        x_min, y_min = max(0, x_min), max(0, y_min)
+                        x_max, y_max = min(w, x_max), min(h, y_max)
+                        
+                        if x_max > x_min and y_max > y_min:
+                            cropped_image = latest_frame_for_cropping[y_min:y_max, x_min:x_max]
+                            if cropped_image.size > 0: # Check if cropped image is not empty
+                                ret, buffer = cv2.imencode('.jpg', cropped_image)
+                                if ret:
+                                    detection['image'] = base64.b64encode(buffer).decode('utf-8')
+                                else:
+                                    logger.warning("current_detections: Could not encode cropped detection image to JPEG")
+                            else:
+                                logger.warning(f"current_detections: Cropped image is empty for box {box}")
                         else:
-                            logger.warning("current_detections: Could not encode cropped detection image to JPEG")
+                             logger.warning(f"current_detections: Invalid box coordinates for cropping: {box}")
                     else:
-                        logger.warning("current_detections: Invalid bounding box format")
+                        logger.warning("current_detections: Invalid bounding box format for image cropping")
                 except Exception as e:
                     logger.exception("current_detections: Error processing detection image")
         else:
             logger.warning("current_detections: No latest frame available for cropping detection images")
 
-        return jsonify(data)  # Now contains JSON-serializable data and detection images
+        response_data = {
+            'detections': detections_for_api,
+            'frame_shape': frame_shape_for_api
+        }
+        return jsonify(response_data)
     except Exception as e:
-        logger.exception("API: Error getting or serializing current detections data")
-        return jsonify({"error": "Failed to get current detections data"}), 500
+        logger.exception("API: Error getting or serializing current_detections data with images")
+        return jsonify({"error": "Failed to get current detections data with images", "detections": [], "frame_shape": None}), 500
 # ---------------------------------------------
 
 # --- API Endpoints for Backend Annotation Control ---
@@ -697,7 +742,7 @@ if __name__ == '__main__':
         
         # Get host and port from environment variables or use defaults
         host = os.environ.get('FLASK_RUN_HOST', '0.0.0.0')
-        port = int(os.environ.get('FLASK_RUN_PORT', 5000))
+        port = int(os.environ.get('FLASK_RUN_PORT', 3000))
         
         app.run(host=host, port=port, debug=False, use_reloader=False) # use_reloader=False is important for threads
 
