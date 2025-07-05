@@ -621,27 +621,62 @@ def tracking_status():
         logger.exception("API: Error getting tracking status")
         return jsonify({"error": "Failed to get tracking status"}), 500
 
+@app.route('/api/set_track_id_filter', methods=['POST'])
+def set_track_id_filter():
+    """API endpoint to set the track ID filter."""
+    try:
+        data = request.get_json()
+        if not data or 'track_id' not in data:
+            logger.warning("API: Invalid request to set track ID filter. 'track_id' missing.")
+            return jsonify({"error": "Missing 'track_id' in request"}), 400
+
+        track_id = data['track_id']
+        detection_system.set_track_id_filter(track_id)
+        logger.info(f"API: Track ID filter set to {track_id}.")
+        return jsonify({"message": "Track ID filter set successfully", "track_id_filter": track_id}), 200
+    except Exception as e:
+        logger.exception("API: Error setting track ID filter")
+        return jsonify({"error": "Failed to set track ID filter", "details": str(e)}), 500
+
+@app.route('/api/get_track_id_filter', methods=['GET'])
+def get_track_id_filter():
+    """API endpoint to get the current track ID filter."""
+    try:
+        track_id_filter = detection_system.get_track_id_filter()
+        logger.info(f"API: Current Track ID filter: {track_id_filter}")
+        return jsonify({"track_id_filter": track_id_filter}), 200
+    except Exception as e:
+        logger.exception("API: Error retrieving track ID filter")
+        return jsonify({"error": "Failed to retrieve track ID filter", "details": str(e)}), 500
+
 @app.route('/api/set_object_filter', methods=['POST'])
 def set_object_filter():
-    """API to set the object filter for displaying specific labels."""
+    """API endpoint to set the object filter for displaying specific labels."""
     try:
-        print(f"Request data: {request.json}")  # Debugging line
+        # Expecting {'object_filter': ['person', 'car']} or {'object_filter': []}
         filter_data = request.json.get('object_filter', None)
+        
+        # detection_system.set_object_filter handles None and type checking
         detection_system.set_object_filter(filter_data)
-        return jsonify({"object_filter": filter_data})
+
+        status_message = f"Filter set to labels: {filter_data}" if filter_data else "Label filter cleared"
+        logger.info(f"API: {status_message}")
+        return jsonify({"message": status_message, "object_filter": filter_data}), 200
+
     except Exception as e:
         logger.exception("API: Error setting object filter")
-        return jsonify({"error": "Failed to set object filter"}), 500
+        return jsonify({"error": "Failed to set object filter", "details": str(e)}), 500
 
 @app.route('/api/get_object_filter', methods=['GET'])
 def get_object_filter():
-    """API to get the current object filter."""
+    """API endpoint to get the current object filter."""
     try:
-        current_filter = detection_system.get_object_filter()
-        return jsonify({"object_filter": current_filter})
+        current_filter = detection_system.get_label_filter()
+        logger.debug(f"API: Getting object filter: {current_filter}")
+        return jsonify({"object_filter": current_filter}), 200
     except Exception as e:
         logger.exception("API: Error getting object filter")
-        return jsonify({"error": "Failed to get object filter"}), 500
+        return jsonify({"error": "Failed to get object filter", "object_filter": []}), 500
 
 # --- API Endpoint for Single Image Detection ---
 @app.route('/api/detect', methods=['POST'])

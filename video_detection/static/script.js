@@ -8,6 +8,8 @@ const API_ENDPOINTS = {
     CURRENT_DETECTIONS: "/api/current_detections",
     TRACKING_STATUS: "/api/tracking_status",
     TRACKING_TOGGLE: "/api/toggle_tracking",
+    TRACK_ID_FILTER_GET: "/api/get_track_id_filter",
+    TRACK_ID_FILTER_SET: "/api/set_track_id_filter",
 };
 
 const UPDATE_INTERVALS = {
@@ -112,21 +114,31 @@ async function fetchObjectFilterForInput() { // Primarily populates the input an
 
 async function updateCurrentFilterStatusLabel() { // Primarily updates the status label, also refreshes global var
     try {
-        const response = await fetch(API_ENDPOINTS.OBJECT_FILTER_GET); // Fetch to get the latest
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
-        currentObjectFilter = data.object_filter || []; // Update global state
+        const trackIdResponse = await fetch(API_ENDPOINTS.TRACK_ID_FILTER_GET);
+        if (!trackIdResponse.ok) throw new Error(`HTTP error! status: ${trackIdResponse.status}`);
+        const trackIdData = await trackIdResponse.json();
 
-        if (currentFilterStatusLabel) {
-            if (currentObjectFilter.length > 0) {
-                currentFilterStatusLabel.textContent = currentObjectFilter.join(", ");
+        const objectFilterResponse = await fetch(API_ENDPOINTS.OBJECT_FILTER_GET);
+        if (!objectFilterResponse.ok) throw new Error(`HTTP error! status: ${objectFilterResponse.status}`);
+        const objectFilterData = await objectFilterResponse.json();
+
+        const trackIdFilter = trackIdData.track_id_filter;
+        const objectFilter = objectFilterData.object_filter || [];
+
+        const filterStatusLabel = document.getElementById("currentFilterStatusLabel");
+        if (filterStatusLabel) {
+            if (trackIdFilter !== null) {
+                filterStatusLabel.textContent = `Track ID: ${trackIdFilter}`;
+            } else if (objectFilter.length > 0) {
+                filterStatusLabel.textContent = `Labels: ${objectFilter.join(", ")}`;
             } else {
-                currentFilterStatusLabel.textContent = "None (all objects shown)";
+                filterStatusLabel.textContent = "None (all objects shown)";
             }
         }
     } catch (error) {
-        console.error("Error fetching current filter status for label:", error);
-        if (currentFilterStatusLabel) currentFilterStatusLabel.textContent = "Error loading status";
+        console.error("Error updating filter status label:", error);
+        const filterStatusLabel = document.getElementById("currentFilterStatusLabel");
+        if (filterStatusLabel) filterStatusLabel.textContent = "Error loading status";
     }
 }
 
@@ -144,14 +156,88 @@ async function setObjectFilter() {
         console.log("Object filter set to:", data.object_filter);
         currentObjectFilter = data.object_filter || []; // Update global filter
         updateCurrentFilterStatusLabel(); // Refresh the displayed active filter status
+        displayFeedback("Object filter set successfully.");
     } catch (error) {
         console.error("Error setting object filter:", error);
+        displayFeedback("Failed to set object filter.", true);
+    }
+}
+
+async function displayFeedback(message, isError = false) {
+    const feedbackElement = document.getElementById("feedbackMessage");
+    if (feedbackElement) {
+        feedbackElement.textContent = message;
+        feedbackElement.style.color = isError ? "red" : "green";
+        feedbackElement.style.display = "block";
+        setTimeout(() => {
+            feedbackElement.style.display = "none";
+        }, 3000); // Hide after 3 seconds
+    }
+}
+
+async function setTrackIdFilter() {
+    const trackIdInput = document.getElementById("trackIdFilterInput");
+    if (!trackIdInput) return;
+
+    const trackIdValue = trackIdInput.value.trim();
+    try {
+        const response = await fetch(API_ENDPOINTS.TRACK_ID_FILTER_SET, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ track_id: trackIdValue ? parseInt(trackIdValue, 10) : null })
+        });
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        console.log("Track ID filter set to:", data.track_id_filter);
+        updateCurrentFilterStatusLabel();
+        displayFeedback("Track ID filter set successfully.");
+    } catch (error) {
+        console.error("Error setting track ID filter:", error);
+        displayFeedback("Failed to set Track ID filter.", true);
+    }
+}
+
+async function clearFilters() {
+    try {
+        const trackIdResponse = await fetch(API_ENDPOINTS.TRACK_ID_FILTER_SET, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ track_id: null })
+        });
+        if (!trackIdResponse.ok) throw new Error(`HTTP error! status: ${trackIdResponse.status}`);
+
+        const objectFilterResponse = await fetch(API_ENDPOINTS.OBJECT_FILTER_SET, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ object_filter: [] })
+        });
+        if (!objectFilterResponse.ok) throw new Error(`HTTP error! status: ${objectFilterResponse.status}`);
+
+        console.log("All filters cleared.");
+        updateCurrentFilterStatusLabel();
+        displayFeedback("Filters cleared successfully.");
+    } catch (error) {
+        console.error("Error clearing filters:", error);
+        displayFeedback("Failed to clear filters.", true);
     }
 }
 
 function setupObjectFilterControls() {
     if (setObjectFilterBtn) {
         setObjectFilterBtn.addEventListener("click", setObjectFilter);
+    }
+}
+
+function setupTrackIdFilterControls() {
+    const setTrackIdFilterBtn = document.getElementById("setTrackIdFilterBtn");
+    const clearFilterBtn = document.getElementById("clearFilterBtn");
+
+    if (setTrackIdFilterBtn) {
+        setTrackIdFilterBtn.addEventListener("click", setTrackIdFilter);
+    }
+
+    if (clearFilterBtn) {
+        clearFilterBtn.addEventListener("click", clearFilters);
     }
 }
 
@@ -325,11 +411,16 @@ async function fetchAndDrawDetections() {
 
 // --- Camera Selection --- 
 async function fetchAvailableCameras() {
-    if (!cameraSelectList) return;
+    console.log("fetchAvailableCameras called");
+    if (!cameraSelectList) {
+        console.error("cameraSelectList element not found");
+        return;
+    }
     try {
         const response = await fetch("/api/cams");
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const cameras = await response.json();
+        console.log("Available cameras:", cameras);
 
         cameraSelectList.innerHTML = ''; // Clear existing options
 
@@ -338,6 +429,7 @@ async function fetchAvailableCameras() {
             option.value = "";
             option.textContent = "No cameras found";
             cameraSelectList.appendChild(option);
+            console.log("No cameras found");
             return;
         }
 
@@ -350,6 +442,7 @@ async function fetchAvailableCameras() {
             option.textContent = `${cam.name} (Index: ${cam.index}, ${cam.width}x${cam.height})`;
             cameraSelectList.appendChild(option);
         });
+        console.log("Camera list populated successfully");
     } catch (error) {
         console.error("Error fetching available cameras:", error);
         if (cameraSelectList) {
@@ -360,10 +453,15 @@ async function fetchAvailableCameras() {
 }
 
 async function setSelectedVideoSource() {
-    if (!setVideoSourceBtn || !videoSourceStatus) return; // cameraSelectList and rtspUrlInput checked below
+    console.log("setSelectedVideoSource function called");
+    if (!setVideoSourceBtn || !videoSourceStatus) {
+        console.error("Required elements not found: setVideoSourceBtn or videoSourceStatus");
+        return; // cameraSelectList and rtspUrlInput checked below
+    }
 
     let selectedSourceIdentifier = "";
     const rtspValue = rtspUrlInput ? rtspUrlInput.value.trim() : "";
+    console.log("RTSP input value:", rtspValue);
 
     if (rtspValue) {
         selectedSourceIdentifier = rtspValue;
@@ -373,6 +471,7 @@ async function setSelectedVideoSource() {
         selectedSourceIdentifier = cameraSelectList.value;
         console.log("Using selected camera from dropdown:", selectedSourceIdentifier);
     } else {
+        console.warn("No source selected");
         videoSourceStatus.textContent = "Please select a camera or enter an RTSP URL.";
         return;
     }
@@ -439,8 +538,13 @@ async function setSelectedVideoSource() {
 }
 
 function setupCameraControls() {
+    console.log("setupCameraControls called");
+    console.log("setVideoSourceBtn element:", setVideoSourceBtn);
     if (setVideoSourceBtn) {
         setVideoSourceBtn.addEventListener("click", setSelectedVideoSource);
+        console.log("Event listener added to setVideoSourceBtn");
+    } else {
+        console.error("setVideoSourceBtn element not found");
     }
 }
 
@@ -569,6 +673,56 @@ function setupTrackingToggle() {
     });
 }
 
+// --- Closest Object Selection ---
+async function selectClosestObject() {
+    try {
+        const response = await fetch(API_ENDPOINTS.CURRENT_DETECTIONS);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+
+        if (!data.detections || data.detections.length === 0) {
+            console.warn("No detections available to select closest object.");
+            return;
+        }
+
+        let closestObject = null;
+        let largestArea = 0;
+
+        data.detections.forEach(det => {
+            if (det.box && Array.isArray(det.box) && det.box.length === 4) {
+                const [x1, y1, x2, y2] = det.box;
+                const area = (x2 - x1) * (y2 - y1);
+                if (area > largestArea) {
+                    largestArea = area;
+                    closestObject = det;
+                }
+            }
+        });
+
+        if (closestObject && closestObject.track_id) {
+            const trackIdResponse = await fetch(API_ENDPOINTS.TRACK_ID_FILTER_SET, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ track_id: closestObject.track_id })
+            });
+            if (!trackIdResponse.ok) throw new Error(`HTTP error! status: ${trackIdResponse.status}`);
+            console.log(`Closest object selected with Track ID: ${closestObject.track_id}`);
+            updateCurrentFilterStatusLabel();
+        } else {
+            console.warn("No valid track ID found for the closest object.");
+        }
+    } catch (error) {
+        console.error("Error selecting closest object:", error);
+    }
+}
+
+function setupClosestObjectSelection() {
+    const selectClosestObjectBtn = document.getElementById("selectClosestObjectBtn");
+    if (selectClosestObjectBtn) {
+        selectClosestObjectBtn.addEventListener("click", selectClosestObject);
+    }
+}
+
 // --- Initialization ---
 function initializeApp() {
     // Cache DOM elements
@@ -609,6 +763,9 @@ function initializeApp() {
     setupDebugRenderingToggle();
     setupObjectFilterControls();
     setupTrackingToggle();
+    setupTrackIdFilterControls();
+    setupClosestObjectSelection(); // New setup function for closest object selection
+    setupCameraControls(); // Setup camera source controls
 
     // Fetch initial states
     fetchDebugRenderingStatus();
@@ -625,11 +782,28 @@ function initializeApp() {
 
     // Fetch and populate cameras
     fetchAvailableCameras();
-    setupCameraControls();
+    // setupCameraControls(); // Moved to setupCameraControls function
 }
 
 // Wait for the DOM to be fully loaded before initializing
 document.addEventListener("DOMContentLoaded", initializeApp);
 
-// Remove obsolete function (if it was in the original HTML script block)
-// function updateTrackedObjects() { /* ... */ } // This is now removed.
+// Debug function to test camera source selection
+function testCameraButton() {
+    console.log("Testing camera button...");
+    const btn = document.getElementById("setVideoSourceBtn");
+    console.log("Button found:", btn);
+    if (btn) {
+        console.log("Button onclick:", btn.onclick);
+        console.log("Button addEventListener count:", btn.getEventListeners ? btn.getEventListeners('click').length : 'getEventListeners not available');
+    }
+    
+    const select = document.getElementById("cameraSelectList");
+    console.log("Select element found:", select);
+    if (select) {
+        console.log("Select options:", select.options.length);
+    }
+}
+
+// Call test function after a delay to ensure DOM is ready
+setTimeout(testCameraButton, 2000);

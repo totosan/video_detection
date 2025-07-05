@@ -15,6 +15,17 @@
             "stopAtEntry": false,
             "console": "internalConsole"
         },
+        {
+            "name": "Frontend OpenAI",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "${workspaceFolder}/Frontend/bin/Debug/net9.0/Frontend.dll",
+            "args": ["-online"],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "console": "internalConsole"
+        },
          {
             "name": "Frontend ollama",
             "type": "coreclr",
