@@ -134,6 +134,7 @@ class AnnotationWorker:
                     except Exception as e:
                         logger.exception(f"Error processing mask: {e}")
                 
+                text_size = 1.2
                 # Second pass: Draw labels
                 for det in current_detections:
                     try:
@@ -148,9 +149,9 @@ class AnnotationWorker:
                         color = tuple(int(c) for c in det['color']) if 'color' in det and det['color'] is not None else (0, 255, 0)
                         
                         # Draw label background and text
-                        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, text_size, 1)
                         cv2.rectangle(annotated, (x1, y1 - h - 4), (x1 + w, y1), color, -1)
-                        cv2.putText(annotated, label, (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        cv2.putText(annotated, label, (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, text_size, (255, 255, 255), 1)
                     except Exception as e:
                         logger.exception(f"Error processing detection box: {e}")
                 self.annotated_frame_callback(annotated)

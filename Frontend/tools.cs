@@ -107,8 +107,8 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"With this function you can get the whole picture of the scene. Furthermore it enables rich and detailed analysis of the image.")]
-        public async Task<string> GetRawSnapshotAsync()
+        [KernelFunction, Description(@"Describes the image from the video camera. Use this tool when the user asks 'What can you see?' or 'describe, what you see'. It provides a detailed analysis of the image, including objects and their positions.")]
+        public async Task<string> GetTheImage()
         {
             Console.WriteLine("Getting current snapshot");
             string url = $"{FlaskAppBaseUrl}/backend_snapshot"; // Uses the app base URL
@@ -141,20 +141,21 @@ namespace Frontend
                 var userMessage = new ChatMessageContentItemCollection
                 {
                   new TextContent("""
-                  Task: as a vision model, please describe the image. pin point the main objects in the image and their position.
-                  
+                  As a vision model, describe the image in detail. Identify the main objects and their positions.
+
                   Rules:
                   - Provide a detailed description of the image.
                   - Include information about the objects, their positions, and any relevant context.
                   - Use clear and concise language.
-                  - keep it simple
+                  - Keep it simple.
                   
                   Format:
                     - Use JSON format for the response.
                     - Include the following keys in the JSON response:
-                        - objects: List of objects detected in the image.
-                           - object[0]: { "name": "object_name", "position": <Descripttion in prosa> }
-
+                        - "description": "A summary of what the image depicts."
+                        - "objects": [
+                            { "name": "object_name", "position": "A description of where the object is in the scene." }
+                          ]
                   """),
                     new ImageContent(new ReadOnlyMemory<byte>(Convert.FromBase64String(base64Image)), "image/jpeg")
                 };
@@ -162,7 +163,12 @@ namespace Frontend
                 chat.AddUserMessage(userMessage);
                 var result = await _chatCompletionService.GetChatMessageContentAsync(chat);
 
-                return result.Content;
+                if (result?.Content is string content)
+                {
+                    return content;
+                }
+
+                return JsonSerializer.Serialize(new { status = "error", message = "Failed to get a description from the vision model." });
             }
             catch (HttpRequestException e)
             {
