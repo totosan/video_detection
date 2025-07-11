@@ -552,86 +552,36 @@ function setupCameraControls() {
 function updateTrackedObjectsList() {
     if (!trackedObjectsList) return;
 
-    fetch(API_ENDPOINTS.TRACKED_OBJECTS)
+    // Fetch current detections instead of filtered tracked_objects to always display items
+    fetch(API_ENDPOINTS.CURRENT_DETECTIONS)
         .then(response => {
             if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
             return response.json();
         })
         .then(data => {
-            const fragment = document.createDocumentFragment(); // Use DocumentFragment
-
-            if (!Array.isArray(data)) {
-                console.error("Tracked objects data is not an array:", data);
-                const errorItem = document.createElement("li");
-                errorItem.textContent = "Error: Invalid data format from server.";
-                fragment.appendChild(errorItem);
-            } else if (data.length === 0) {
-                const noObjectsItem = document.createElement("li");
-                noObjectsItem.textContent = "No objects tracked recently.";
-                fragment.appendChild(noObjectsItem);
+            const fragment = document.createDocumentFragment();
+            const detections = Array.isArray(data.detections) ? data.detections : [];
+            if (detections.length === 0) {
+                const item = document.createElement("li");
+                item.textContent = "No objects detected.";
+                fragment.appendChild(item);
             } else {
-                try {
-                    data.sort((a, b) => { // Sort by time_since_seen (most recent first)
-                        const timeA = parseFloat(a.time_since_seen);
-                        const timeB = parseFloat(b.time_since_seen);
-                        if (isNaN(timeA) && isNaN(timeB)) return 0;
-                        if (isNaN(timeA)) return 1; // Push NaNs to the end
-                        if (isNaN(timeB)) return -1;
-                        return timeA - timeB; // Ascending sort
-                    });
-                } catch (e) {
-                    console.error("Error sorting tracked objects:", e, data);
-                    const errorItem = document.createElement("li");
-                    errorItem.textContent = "Error: Could not sort object data.";
-                    fragment.appendChild(errorItem);
-                    // Clear list and append only the error
-                    trackedObjectsList.innerHTML = "";
-                    trackedObjectsList.appendChild(fragment);
-                    return; 
-                }
-                
-                const limitedData = data.slice(0, 5); // Limit to 5 most recent
-
-                limitedData.forEach(obj => {
+                detections.forEach(det => {
                     const listItem = document.createElement("li");
-                    listItem.className = "list-group-item"; // Bootstrap class, ensure it"s defined in your CSS if used
+                    listItem.className = "list-group-item";
+                    listItem.textContent = `ID: ${det.id}, Name: ${det.name}`;
                     listItem.style.cursor = "pointer";
-
-                    if (obj.time_since_seen < 3.0) {
-                        listItem.classList.add("recent");
-                    } else {
-                        listItem.classList.add("stale");
-                    }
-
-                    if (obj.detection_image) {
-                        const img = document.createElement("img");
-                        img.src = "data:image/jpeg;base64," + obj.detection_image;
-                        img.alt = `Object ${obj.id}`;
-                        img.style.width = "60px";
-                        img.style.height = "60px";
-                        img.style.marginRight = "10px";
-                        listItem.appendChild(img);
-                    }
-
-                    // Ensure time_since_seen is a number before calling toFixed
-                    const timeSinceSeenText = typeof obj.time_since_seen === "number" ? obj.time_since_seen.toFixed(1) : obj.time_since_seen;
-                    const textNode = document.createTextNode(
-                        `ID: ${obj.id}, Name: ${obj.name}, Seen: ${timeSinceSeenText}s ago`
-                    );
-                    listItem.appendChild(textNode);
-
                     listItem.addEventListener("click", () => {
-                        if (obj.name && objectFilterInput) {
-                            objectFilterInput.value = obj.name;
-                            setObjectFilter(); // Apply the filter
-                            console.log(`Filter set to "${obj.name}" by clicking tracked object.`);
+                        if (det.name && objectFilterInput) {
+                            objectFilterInput.value = det.name;
+                            setObjectFilter();
                         }
                     });
                     fragment.appendChild(listItem);
                 });
             }
-            trackedObjectsList.innerHTML = ""; // Clear current list once
-            trackedObjectsList.appendChild(fragment); // Append all new items
+            trackedObjectsList.innerHTML = "";
+            trackedObjectsList.appendChild(fragment);
         })
         .catch(error => {
             console.error("Error fetching tracked objects:", error);
@@ -673,56 +623,6 @@ function setupTrackingToggle() {
     });
 }
 
-// --- Closest Object Selection ---
-async function selectClosestObject() {
-    try {
-        const response = await fetch(API_ENDPOINTS.CURRENT_DETECTIONS);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
-
-        if (!data.detections || data.detections.length === 0) {
-            console.warn("No detections available to select closest object.");
-            return;
-        }
-
-        let closestObject = null;
-        let largestArea = 0;
-
-        data.detections.forEach(det => {
-            if (det.box && Array.isArray(det.box) && det.box.length === 4) {
-                const [x1, y1, x2, y2] = det.box;
-                const area = (x2 - x1) * (y2 - y1);
-                if (area > largestArea) {
-                    largestArea = area;
-                    closestObject = det;
-                }
-            }
-        });
-
-        if (closestObject && closestObject.track_id) {
-            const trackIdResponse = await fetch(API_ENDPOINTS.TRACK_ID_FILTER_SET, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ track_id: closestObject.track_id })
-            });
-            if (!trackIdResponse.ok) throw new Error(`HTTP error! status: ${trackIdResponse.status}`);
-            console.log(`Closest object selected with Track ID: ${closestObject.track_id}`);
-            updateCurrentFilterStatusLabel();
-        } else {
-            console.warn("No valid track ID found for the closest object.");
-        }
-    } catch (error) {
-        console.error("Error selecting closest object:", error);
-    }
-}
-
-function setupClosestObjectSelection() {
-    const selectClosestObjectBtn = document.getElementById("selectClosestObjectBtn");
-    if (selectClosestObjectBtn) {
-        selectClosestObjectBtn.addEventListener("click", selectClosestObject);
-    }
-}
-
 // --- Initialization ---
 function initializeApp() {
     // Cache DOM elements
@@ -760,32 +660,25 @@ function initializeApp() {
     }
     window.addEventListener("resize", resizeCanvas);
     
+    // Initial setup calls
+    fetchDebugRenderingStatus();
+    fetchObjectFilterForInput(); // Get initial filter state for the input box
+    updateCurrentFilterStatusLabel(); // Get initial filter state for the status label
+    fetchAvailableCameras();
+    fetchTrackingStatus();
+
+    // Setup event listeners
     setupDebugRenderingToggle();
     setupObjectFilterControls();
-    setupTrackingToggle();
     setupTrackIdFilterControls();
-    setupClosestObjectSelection(); // New setup function for closest object selection
-    setupCameraControls(); // Setup camera source controls
+    setupTrackingToggle();
+    setupCameraControls();
 
-    // Fetch initial states
-    fetchDebugRenderingStatus();
-    fetchObjectFilterForInput();       // Populates input and currentObjectFilter
-    updateCurrentFilterStatusLabel();  // Updates the label based on (potentially just fetched) currentObjectFilter
-    fetchTrackingStatus();
-    updateTrackedObjectsList();        // Initial call for tracked objects
-
-    // Start loops
-    requestAnimationFrame(fetchAndDrawDetections); // Start drawing loop
-
-    setInterval(updateTrackedObjectsList, UPDATE_INTERVALS.TRACKED_OBJECTS);
-    setInterval(updateCurrentFilterStatusLabel, UPDATE_INTERVALS.FILTER_STATUS); // Periodically update filter status label
-
-    // Fetch and populate cameras
-    fetchAvailableCameras();
-    // setupCameraControls(); // Moved to setupCameraControls function
+    // Start the drawing loop
+    requestAnimationFrame(fetchAndDrawDetections);
 }
 
-// Wait for the DOM to be fully loaded before initializing
+// Initialize app on DOMContentLoaded
 document.addEventListener("DOMContentLoaded", initializeApp);
 
 // Debug function to test camera source selection

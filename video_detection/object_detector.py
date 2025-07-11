@@ -16,7 +16,7 @@ FRAME_SKIP_FACTOR = 0 # Process every Nth frame (e.g., 2 means process 1, skip 1
 # -------------------
 
 class ObjectDetector:
-    def __init__(self, model, frame_queue, annotation_queue, stop_event, results_update_callback, max_track_points, model_names, tracker_config_path=None, filter_track_id=None, filter_labels=None): # Add filter_track_id and filter_labels
+    def __init__(self, model, frame_queue, annotation_queue, stop_event, results_update_callback, max_track_points, model_names, tracker_config_path=None): # Remove filter_track_id and filter_labels
         self.model = model
         self.frame_queue = frame_queue
         self.annotation_queue = annotation_queue
@@ -26,8 +26,6 @@ class ObjectDetector:
         self.model_names = model_names
         self.tracker_config_path = tracker_config_path # Store the path
         self.thread = None
-        self.filter_track_id = filter_track_id # Store the filter track ID
-        self.filter_labels = filter_labels if filter_labels is not None else [] # Store the filter labels, default to empty list
         # Determine device based on OS
         if platform.system() == "Darwin": # macOS
             self.device = 'mps'
@@ -111,77 +109,51 @@ class ObjectDetector:
                             current_track_id = int(track_ids[i]) if track_ids[i] is not None else None
                             color = ((current_track_id * 50) % 255, (current_track_id * 80) % 255, (current_track_id * 120) % 255) if current_track_id is not None else (255,0,0)
 
-                            # --- Filtering Logic ---
-                            include_detection = False
-                            if self.filter_track_id is not None:
-                                # Filter by track ID if set
-                                if current_track_id is not None and current_track_id == self.filter_track_id:
-                                    include_detection = True
-                            elif self.filter_labels:
-                                # Filter by labels if track ID filter is not set and labels filter is set
-                                if label in self.filter_labels:
-                                    include_detection = True
-                            else:
-                                # No filter set, include all detections
-                                include_detection = True
+                            detection = {
+                                'box': box,
+                                'label': label,
+                                'color': color,
+                                'track_id': current_track_id
+                            }
 
-                            if include_detection:
-                                detection = {
-                                    'box': box,
-                                    'label': label,
-                                    'color': color,
-                                    'track_id': current_track_id
-                                }
+                            # Add mask points if available
+                            # The frontend expects 'mask_points' with normalized coordinates
+                            added_mask_points = False
+                            if masks_xyn is not None and i < len(masks_xyn) and len(masks_xyn[i]) > 0:
+                                detection['mask_points'] = masks_xyn[i].tolist() # Already normalized
+                                detection['has_mask'] = True
+                                added_mask_points = True
+                            elif masks_xy is not None and i < len(masks_xy) and len(masks_xy[i]) > 0 and \
+                                 frame_shape_from_process and len(frame_shape_from_process) == 2:
+                                # frame_shape_from_process is (height, width)
+                                # masks_xy[i] is a numpy array of [[x,y], [x,y], ...]
+                                # Ensure points are not empty before division
+                                normalized_points = (masks_xy[i] / np.array([frame_shape_from_process[1], frame_shape_from_process[0]])).tolist()
+                                detection['mask_points'] = normalized_points
+                                detection['has_mask'] = True
+                                added_mask_points = True
 
-                                # Add mask points if available
-                                # The frontend expects 'mask_points' with normalized coordinates
-                                added_mask_points = False
-                                if masks_xyn is not None and i < len(masks_xyn) and len(masks_xyn[i]) > 0:
-                                    detection['mask_points'] = masks_xyn[i].tolist() # Already normalized
-                                    detection['has_mask'] = True
-                                    added_mask_points = True
-                                elif masks_xy is not None and i < len(masks_xy) and len(masks_xy[i]) > 0 and \
-                                     frame_shape_from_process and len(frame_shape_from_process) == 2:
-                                    # frame_shape_from_process is (height, width)
-                                    # masks_xy[i] is a numpy array of [[x,y], [x,y], ...]
-                                    # Ensure points are not empty before division
-                                    normalized_points = (masks_xy[i] / np.array([frame_shape_from_process[1], frame_shape_from_process[0]])).tolist()
-                                    detection['mask_points'] = normalized_points
-                                    detection['has_mask'] = True
-                                    added_mask_points = True
+                            if not added_mask_points and has_masks_attr:
+                                # If masks attribute exists (e.g. results[0].masks.data was found)
+                                # but we couldn't get .xyn or .xy points for this specific detection.
+                                detection['has_mask'] = True # For annotation worker
+                                logger.debug(f"Mask data might exist for detection {i} (used by annotation worker), but no contour points (xyn/xy) extracted for API.")
 
-                                if not added_mask_points and has_masks_attr:
-                                    # If masks attribute exists (e.g. results[0].masks.data was found)
-                                    # but we couldn't get .xyn or .xy points for this specific detection.
-                                    detection['has_mask'] = True # For annotation worker
-                                    logger.debug(f"Mask data might exist for detection {i} (used by annotation worker), but no contour points (xyn/xy) extracted for API.")
-
-                                serializable_detections.append(detection)
+                            serializable_detections.append(detection)
                         # -------------------------------------------------------------
 
                     # Enqueue serializable detection data and frame for annotation
-                    # Only enqueue if there are detections AFTER filtering
-                    if serializable_detections: # Check if not empty
-                        try:
-                            self.annotation_queue.put_nowait((\
-                                serializable_detections,\
-                                frame_shape_from_process, # Use the shape from process_frame
-                                track_history,\
-                                tracked_objects_info,\
-                                frame.copy()  # Send the frame that was actually processed
-                            ))
-                        except queue.Full:
-                            logger.warning("Annotation queue is full; dropping frame annotation task.")
-                    else:
-                         # If no detections after filtering, still send empty list to update state
-                         self.annotation_queue.put_nowait((
-                             [], # Empty detections list
-                             frame_shape_from_process,
-                             track_history,
-                             tracked_objects_info,
-                             frame.copy()
-                         ))
-
+                    # Always enqueue the full, unfiltered list for the annotation worker
+                    try:
+                        self.annotation_queue.put_nowait((\
+                            serializable_detections,\
+                            frame_shape_from_process, # Use the shape from process_frame
+                            track_history,\
+                            tracked_objects_info,\
+                            frame.copy()  # Send the frame that was actually processed
+                        ))
+                    except queue.Full:
+                        logger.warning("Annotation queue is full; dropping frame annotation task.")
 
                     # Update central state with PROCESSED detection data
                     self.results_update_callback(
@@ -257,7 +229,7 @@ class ObjectDetector:
             # Check if we have segmentation masks
             has_segmentation = hasattr(results[0], 'masks') and results[0].masks is not None
             if has_segmentation:
-                logger.info("Segmentation masks detected from YOLOv11n-seg model")
+                logger.debug("Segmentation masks detected from YOLOv11n-seg model")
 
             # Get masks if they exist
             masks = None
@@ -333,6 +305,5 @@ class ObjectDetector:
 
     def update_filters(self, track_id=None, labels=None):
         """Updates the filtering criteria for the object detector."""
-        self.filter_track_id = track_id
-        self.filter_labels = labels if labels is not None else []
-        logger.info(f"ObjectDetector filters updated: track_id={self.filter_track_id}, labels={self.filter_labels}")
+        # No filtering logic is applied in this version
+        logger.info(f"ObjectDetector filters updated: track_id={track_id}, labels={labels}")

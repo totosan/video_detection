@@ -111,7 +111,7 @@ namespace Frontend
         public async Task<string> GetTheImage()
         {
             Console.WriteLine("Getting current snapshot");
-            string url = $"{FlaskAppBaseUrl}/backend_snapshot"; // Uses the app base URL
+            string url = $"{FlaskAppBaseUrl}/snapshot"; // Uses the app base URL
             try
             {
                 HttpResponseMessage response = await client.GetAsync(url);
@@ -120,7 +120,7 @@ namespace Frontend
                 using var image = Image.Load(imageBytes);
                 int width = image.Width;
                 int height = image.Height;
-                double scale = 0.25; // reduce size
+                double scale = 0.75; // reduce size
                 int newWidth = (int)(width * scale);
                 int newHeight = (int)(height * scale); 
 
@@ -145,7 +145,8 @@ namespace Frontend
 
                   Rules:
                   - Provide a detailed description of the image.
-                  - Include information about the objects, their positions, and any relevant context.
+                  - For each object, describe its position using relative terms like "foreground", "background", "left", "right", "center", and "closest to the camera".
+                  - Be very specific about which object appears nearest to the viewer.
                   - Use clear and concise language.
                   - Keep it simple.
                   
@@ -154,7 +155,7 @@ namespace Frontend
                     - Include the following keys in the JSON response:
                         - "description": "A summary of what the image depicts."
                         - "objects": [
-                            { "name": "object_name", "position": "A description of where the object is in the scene." }
+                            { "name": "object_name", "ID": "object_id", "position": "A description of where the object is in the scene, including its relative distance." }
                           ]
                   """),
                     new ImageContent(new ReadOnlyMemory<byte>(Convert.FromBase64String(base64Image)), "image/jpeg")

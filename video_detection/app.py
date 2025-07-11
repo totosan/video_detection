@@ -309,36 +309,30 @@ def api_current_detections_light():
     """API endpoint to get the latest raw detection results for client-side drawing.
        This version is 'light' because it does not attempt to add cropped images.
        It directly returns the serializable detections from the detection system.
+       Filtering is applied here based on the currently set filters.
     """
     try:
-        # get_current_detections_data() in DetectionSystem should now return a dict like:
-        # {
-        #   'detections': list_of_serializable_detection_dicts, # (this list is what we want)
-        #   'frame_shape': (height, width),
-        #   'timestamp': ...
-        # }
-        # The serializable_detection_dicts are prepared by ObjectDetector._detect_objects
-        # and already include 'mask_points' if available.
-        
         data_from_system = detection_system.get_current_detections_data()
         
-        # The detections list is already prepared with box, label, color, track_id, and mask_points
         detections_for_api = data_from_system.get('detections', [])
         frame_shape_for_api = data_from_system.get('frame_shape', None)
 
-        # The frontend expects a dictionary with a 'detections' key (list) and a 'frame_shape' key.
+        # --- Apply Filters ---
+        track_id_filter = detection_system.get_track_id_filter()
+        label_filter = detection_system.get_label_filter()
+
+        if track_id_filter is not None:
+            detections_for_api = [d for d in detections_for_api if d.get('track_id') == track_id_filter]
+        
+        if label_filter: # If the list is not empty
+            detections_for_api = [d for d in detections_for_api if d.get('label') in label_filter]
+        # --- End of Filters ---
+
         response_data = {
             'detections': detections_for_api,
             'frame_shape': frame_shape_for_api
         }
         
-        # Log for debugging what is being sent
-        # Be cautious with logging potentially large data structures in production
-        if detections_for_api:
-            # Log only the first detection or key fields to avoid overly verbose logs
-            # logger.debug(f"API /api/current_detections_light: Sending {len(detections_for_api)} detections. First detection keys: {detections_for_api[0].keys() if detections_for_api else 'N/A'}, Frame shape: {frame_shape_for_api}")
-            pass # Logging can be added here if needed for debugging
-
         return jsonify(response_data)
     except Exception as e:
         logger.exception("API: Error getting or serializing current_detections_light data")
@@ -348,6 +342,7 @@ def api_current_detections_light():
 def api_current_detections():
     """API endpoint to get the latest raw detection results for client-side drawing,
        including cropped images for each detection.
+       Filtering is applied here based on the currently set filters.
     """
     try:
         data_from_system = detection_system.get_current_detections_data()
@@ -355,9 +350,19 @@ def api_current_detections():
         detections_for_api = data_from_system.get('detections', [])
         frame_shape_for_api = data_from_system.get('frame_shape', None)
 
+        # --- Apply Filters ---
+        track_id_filter = detection_system.get_track_id_filter()
+        label_filter = detection_system.get_label_filter()
+
+        if track_id_filter is not None:
+            detections_for_api = [d for d in detections_for_api if d.get('track_id') == track_id_filter]
+
+        if label_filter: # If the list is not empty
+            detections_for_api = [d for d in detections_for_api if d.get('label') in label_filter]
+        # --- End of Filters ---
+
         # Add detection images (cropped regions) for each detection
-        # This part remains largely the same, but operates on the already prepared detections_for_api list
-        latest_frame_for_cropping = detection_system.get_latest_frame() # Get the full frame for cropping
+        latest_frame_for_cropping = detection_system.get_latest_frame()
 
         if latest_frame_for_cropping is not None:
             for detection in detections_for_api: # Iterate over the list of detection dicts
@@ -496,25 +501,36 @@ def api_track_history():
 
 @app.route('/snapshot')
 def snapshot():
-    """Returns a single JPEG snapshot from the latest captured frame."""
-    # Ensure detection system is running (optional check)
+    """Returns a single JPEG snapshot, preferring the annotated frame, then raw frame."""
     if not detection_system.is_running():
         logger.warning("snapshot: Detection system not running.")
-        # Optionally try restarting it, or just return error
-        # detection_system.start() # Be careful with restarting logic
         return ("Detection system not running", 503)
 
-    logger.debug("Snapshot: Retrieving from detection_system.")
-    frame = detection_system.get_latest_frame()
+    logger.debug("Snapshot: Retrieving frame from detection_system.")
+    frame_to_send = None
+    
+    # Try to get the annotated frame first
+    annotated_frame = detection_system.get_latest_annotated_frame()
+    if annotated_frame is not None:
+        logger.debug("Snapshot: Using latest annotated frame.")
+        frame_to_send = annotated_frame
+    else:
+        logger.debug("Snapshot: Annotated frame not available, trying latest raw frame.")
+        raw_frame = detection_system.get_latest_frame()
+        if raw_frame is not None:
+            logger.debug("Snapshot: Using latest raw frame.")
+            frame_to_send = raw_frame
 
-    if frame is None:
-        logger.info("Snapshot: No frame available.") # Use info
+    if frame_to_send is None:
+        logger.info("Snapshot: No frame available (neither annotated nor raw).")
         return ("No frame available", 503)
 
-    ret, buffer = cv2.imencode('.jpg', frame)
+    ret, buffer = cv2.imencode('.jpg', frame_to_send)
     if not ret:
-        logger.error("Snapshot: Error encoding frame.") # Use error
+        logger.error("Snapshot: Error encoding frame.")
         return ("Error encoding frame", 500)
+    
+    logger.debug("Snapshot: Returning JPEG image.")
     return Response(buffer.tobytes(), mimetype='image/jpeg')
 
 @app.route('/raw_snapshot')
@@ -565,40 +581,6 @@ def raw_snapshot():
     
     logger.debug(f"Raw snapshot: Returning JPEG image from {source_to_open}.")
     return Response(buf.tobytes(), mimetype='image/jpeg')
-
-@app.route('/backend_snapshot')
-def backend_snapshot():
-    """Returns a single JPEG snapshot, preferring the annotated frame, then raw frame."""
-    if not detection_system.is_running():
-        logger.warning("backend_snapshot: Detection system not running.")
-        return ("Detection system not running", 503)
-
-    logger.debug("Backend snapshot: Retrieving frame from detection_system.")
-    frame_to_send = None
-    
-    # Try to get the annotated frame first
-    annotated_frame = detection_system.get_latest_annotated_frame()
-    if annotated_frame is not None:
-        logger.debug("Backend snapshot: Using latest annotated frame.")
-        frame_to_send = annotated_frame
-    else:
-        logger.debug("Backend snapshot: Annotated frame not available, trying latest raw frame.")
-        raw_frame = detection_system.get_latest_frame()
-        if raw_frame is not None:
-            logger.debug("Backend snapshot: Using latest raw frame.")
-            frame_to_send = raw_frame
-
-    if frame_to_send is None:
-        logger.info("Backend snapshot: No frame available (neither annotated nor raw).")
-        return ("No frame available", 503)
-
-    ret, buffer = cv2.imencode('.jpg', frame_to_send)
-    if not ret:
-        logger.error("Backend snapshot: Error encoding frame.")
-        return ("Error encoding frame", 500)
-    
-    logger.debug("Backend snapshot: Returning JPEG image.")
-    return Response(buffer.tobytes(), mimetype='image/jpeg')
 
 # Add API endpoints in app.py
 @app.route('/api/toggle_tracking', methods=['POST'])
@@ -720,6 +702,125 @@ def api_detect_objects():
         logger.exception("API /api/detect: Error processing image")
         return jsonify({"error": str(e)}), 500
 # ---------------------------------------------
+
+# --- API Endpoints ---
+@app.route('/api/select_closest_object', methods=['POST'])
+def select_closest_object():
+    """
+    Selects the object closest to the given (x, y) coordinates and sets the track ID filter.
+    """
+    data = request.get_json()
+    x = data.get('x')
+    y = data.get('y')
+
+    if x is None or y is None:
+        return jsonify({"error": "Missing x or y coordinates"}), 400
+
+    # The frontend sends normalized coordinates, but the backend expects pixel coordinates.
+    # We need the frame dimensions to convert them back.
+    # Let's get the last processed frame dimensions from the detection system.
+    frame_height, frame_width = detection_system.get_last_frame_dimensions()
+
+    if frame_width == 0 or frame_height == 0:
+        return jsonify({"error": "Backend not ready, frame dimensions unknown."}), 503
+
+    # Convert normalized coordinates to pixel coordinates
+    pixel_x = int(x * frame_width)
+    pixel_y = int(y * frame_height)
+
+    logger.info(f"Received click at normalized ({x:.2f}, {y:.2f}), pixel ({pixel_x}, {pixel_y})")
+
+    # Get the current detections (unfiltered)
+    all_detections = detection_system.get_current_detections()
+
+    closest_object = None
+    min_distance = float('inf')
+
+    for det in all_detections:
+        track_id = det.get('track_id')
+        box = det.get('box') # (x1, y1, x2, y2)
+        mask = det.get('mask') # Optional mask
+
+        if not track_id or not box:
+            continue
+
+        # Determine the center of the object
+        if mask is not None and len(mask) > 0:
+            # Calculate centroid of the mask
+            M = cv2.moments(np.array(mask, dtype=np.int32))
+            if M["m00"] > 0:
+                center_x = int(M["m10"] / M["m00"])
+                center_y = int(M["m01"] / M["m00"])
+            else:
+                # Fallback for zero-area contour
+                center_x = int((box[0] + box[2]) / 2)
+                center_y = int((box[1] + box[3]) / 2)
+        else:
+            # Use center of the bounding box
+            center_x = int((box[0] + box[2]) / 2)
+            center_y = int((box[1] + box[3]) / 2)
+
+        # Calculate Euclidean distance from click to object center
+        distance = np.sqrt((pixel_x - center_x)**2 + (pixel_y - center_y)**2)
+
+        if distance < min_distance:
+            min_distance = distance
+            closest_object = det
+
+    if closest_object:
+        selected_track_id = closest_object.get('track_id')
+        logger.info(f"Closest object found: track_id={selected_track_id} with distance {min_distance:.2f}")
+        # Set the system's track ID filter
+        detection_system.set_track_id_filter(selected_track_id)
+        return jsonify({
+            "success": True, 
+            "message": f"Track ID filter set to {selected_track_id}",
+            "selected_track_id": selected_track_id
+        })
+    else:
+        logger.info("No objects detected, cannot select closest.")
+        return jsonify({"error": "No objects found to select from"}), 404
+
+@app.route('/api/current_detections')
+def get_current_detections():
+    """Returns the current list of detected objects, optionally filtered."""
+    try:
+        # Get query parameters for filtering
+        track_id_filter = request.args.get('track_id', type=int)
+        label_filter = request.args.getlist('label')
+
+        detections = detection_system.get_current_detections()
+
+        # Apply track ID filter if provided
+        if track_id_filter is not None:
+            detections = [d for d in detections if d.get('track_id') == track_id_filter]
+
+        # Apply label filter if provided
+        if label_filter:
+            detections = [d for d in detections if d.get('label') in label_filter]
+
+        # Serialize detections for JSON response
+        serialized_detections = []
+        for det in detections:
+            # Basic serialization
+            serialized_det = {
+                'track_id': det.get('track_id'),
+                'label': det.get('label'),
+                'confidence': det.get('confidence'),
+                'box': det.get('box'), # Assuming box is already a serializable format
+                # Add more fields as needed
+            }
+
+            # If you have complex types, convert them here
+            # For example, if 'box' is a numpy array, convert to list: 'box': det['box'].tolist()
+
+            serialized_detections.append(serialized_det)
+
+        return jsonify(serialized_detections), 200
+    except Exception as e:
+        logger.exception("API: Error getting current detections")
+        return jsonify({"error": "Failed to get current detections"}), 500
+# ------------------------------------
 
 # --- Graceful Shutdown --- 
 def cleanup_on_exit():

@@ -352,11 +352,6 @@ class DetectionSystem:
             self._active_label_filter = [] # Clear label filter when setting track ID filter
             logger.info(f"Filter set to track ID: {self._active_track_id_filter}")
 
-        # Update the ObjectDetector instance if it exists
-        if self.object_detector:
-            self.object_detector.update_filters(track_id=self._active_track_id_filter, labels=self._active_label_filter)
-            logger.debug("ObjectDetector filters updated via set_track_id_filter.")
-
     def set_object_filter(self, labels):
         """Sets the active filter to a list of labels, clearing any track ID filter."""
         # Ensure labels is a list or None
@@ -371,10 +366,11 @@ class DetectionSystem:
             self._active_track_id_filter = None # Clear track ID filter when setting label filter
             logger.info(f"Filter set to labels: {self._active_label_filter}")
 
-        # Update the ObjectDetector instance if it exists
-        if self.object_detector:
-            self.object_detector.update_filters(track_id=self._active_track_id_filter, labels=self._active_label_filter)
-            logger.debug("ObjectDetector filters updated via set_object_filter.")
+    def set_label_filter(self, labels_to_filter):
+        """Sets the filter for object labels."""
+        with self.detections_data_lock: # Use the appropriate lock
+            self._active_label_filter = [label.lower().strip() for label in labels_to_filter]
+            logger.info(f"Label filter set to: {self._active_label_filter}")
 
     def get_track_id_filter(self):
         """Gets the current active track ID filter."""
@@ -385,6 +381,17 @@ class DetectionSystem:
         """Gets the current active label filter."""
         with self.detections_data_lock:
             return self._active_label_filter
+
+    def get_last_frame_dimensions(self):
+        """
+        Returns the dimensions (height, width) of the last processed frame.
+        """
+        with self.detections_data_lock:
+            frame_shape = self.latest_detections_data.get("frame_shape")
+            if frame_shape and len(frame_shape) >= 2:
+                # Assuming shape is (height, width, ...)
+                return frame_shape[0], frame_shape[1]
+        return 0, 0 # Return 0,0 if no frame has been processed yet
     # -------------------------
 
     # --- Lifecycle Management ---
@@ -439,9 +446,7 @@ class DetectionSystem:
             results_update_callback=self.update_detection_results,
             max_track_points=self.max_track_points,
             model_names=model_names,
-            tracker_config_path=CUSTOM_TRACKER_CONFIG,
-            filter_track_id=self._active_track_id_filter, # Pass initial filter
-            filter_labels=self._active_label_filter      # Pass initial filter
+            tracker_config_path=CUSTOM_TRACKER_CONFIG
         )
         logger.info("Initializing AnnotationWorker...")
         self.annotation_worker = AnnotationWorker(
@@ -596,25 +601,6 @@ class DetectionSystem:
         """Check if tracking and bounding box drawing is enabled."""
         return getattr(self, 'draw_tracking_and_bounding_boxes', True)
 
-    # --- New Getter for Current Detections ---
-    def get_current_detections_data(self):
-        """Returns the latest processed detection results and frame shape for the API."""
-        with self.detections_data_lock:
-            # 'results' from latest_detections_data is now the list of serializable dicts
-            # prepared by ObjectDetector._detect_objects AFTER filtering.
-            serializable_detections = self.latest_detections_data.get("results", [])
-            frame_shape_tuple = self.latest_detections_data.get("frame_shape") # Expected (height, width)
-
-            # The API endpoint in app.py expects a dictionary with 'detections' and 'frame_shape'
-            # The 'detections' list should already contain 'mask_points' if available.
-            response_data = {
-                "detections": serializable_detections if serializable_detections is not None else [],
-                "frame_shape": list(frame_shape_tuple) if frame_shape_tuple else None # Convert tuple to list for JSON
-            }
-            # logger.debug(f"DetectionSystem.get_current_detections_data is returning: {response_data}")
-            return response_data
-    # -----------------------------------------
-
     # --- Backend Annotation Control ---
     def enable_backend_annotation(self):
         with self.backend_annotation_lock:
@@ -681,9 +667,7 @@ class DetectionSystem:
             results_update_callback=self.update_detection_results,
             max_track_points=self.max_track_points,
             model_names=model_names,
-            tracker_config_path=CUSTOM_TRACKER_CONFIG,
-            filter_track_id=self._active_track_id_filter, # Pass initial filter
-            filter_labels=self._active_label_filter      # Pass initial filter
+            tracker_config_path=CUSTOM_TRACKER_CONFIG
         )
         logger.info("Initializing AnnotationWorker...")
         self.annotation_worker = AnnotationWorker(
@@ -699,46 +683,4 @@ class DetectionSystem:
         # Start threads SYNCHRONOUSLY (the method itself will manage starting threads)
         self._start_workers()
         # _start_workers will log success or failure of thread starts and raise error if needed.
-
-    # --- New Getter for Current Detections ---
-    def get_current_detections_data(self):
-        """Returns the latest processed detection results and frame shape for the API."""
-        with self.detections_data_lock:
-            # 'results' from latest_detections_data is now the list of serializable dicts
-            # prepared by ObjectDetector._detect_objects AFTER filtering.
-            serializable_detections = self.latest_detections_data.get("results", [])
-            frame_shape_tuple = self.latest_detections_data.get("frame_shape") # Expected (height, width)
-
-            # The API endpoint in app.py expects a dictionary with 'detections' and 'frame_shape'
-            # The 'detections' list should already contain 'mask_points' if available.
-            response_data = {
-                "detections": serializable_detections if serializable_detections is not None else [],
-                "frame_shape": list(frame_shape_tuple) if frame_shape_tuple else None # Convert tuple to list for JSON
-            }
-            # logger.debug(f"DetectionSystem.get_current_detections_data is returning: {response_data}")
-            return response_data
-    # -----------------------------------------
-
-    # --- Backend Annotation Control ---
-    def enable_backend_annotation(self):
-        with self.backend_annotation_lock:
-            self.backend_annotation_enabled = True
-            logger.info("Backend annotation ENABLED.")
-
-    def disable_backend_annotation(self):
-        with self.backend_annotation_lock:
-            self.backend_annotation_enabled = False
-            logger.info("Backend annotation DISABLED.")
-
-    def toggle_backend_annotation(self):
-        with self.backend_annotation_lock:
-            self.backend_annotation_enabled = not self.backend_annotation_enabled
-            status = "ENABLED" if self.backend_annotation_enabled else "DISABLED"
-            logger.info(f"Backend annotation toggled: {status}.")
-            return self.backend_annotation_enabled
-
-    def is_backend_annotation_enabled(self):
-        with self.backend_annotation_lock:
-            return self.backend_annotation_enabled
-    # ----------------------------------
 

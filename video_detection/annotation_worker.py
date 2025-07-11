@@ -39,7 +39,8 @@ class AnnotationWorker:
             try:
                 annotated = frame.copy()
                 # Draw track lines
-                for track_id, points in track_history.items():
+                # Iterate over a copy of the dictionary to prevent runtime errors
+                for track_id, points in list(track_history.items()):
                     if len(points) > 1:
                         color = ((track_id * 50) % 255, (track_id * 80) % 255, (track_id * 120) % 255)
                         pts = [(int(x), int(y)) for x, y in points]
@@ -134,7 +135,7 @@ class AnnotationWorker:
                     except Exception as e:
                         logger.exception(f"Error processing mask: {e}")
                 
-                text_size = 1.2
+                text_size = 2.5 # Adjusted for better fit
                 # Second pass: Draw labels
                 for det in current_detections:
                     try:
@@ -146,12 +147,74 @@ class AnnotationWorker:
                             continue
 
                         label = det['label']
+                        track_id = det.get('track_id')
                         color = tuple(int(c) for c in det['color']) if 'color' in det and det['color'] is not None else (0, 255, 0)
                         
-                        # Draw label background and text
-                        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, text_size, 1)
-                        cv2.rectangle(annotated, (x1, y1 - h - 4), (x1 + w, y1), color, -1)
-                        cv2.putText(annotated, label, (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, text_size, (255, 255, 255), 1)
+                        label_text = f"{label} (ID: {track_id})" if track_id is not None else label
+
+                        # --- Text Placement Logic ---
+                        text_x, text_y = 0, 0
+                        text_origin_set = False
+
+                        # Try to find center of segmentation mask first
+                        if det.get('has_mask') and track_id is not None and track_id in tracked_objects_info and 'segmentation_mask' in tracked_objects_info[track_id]:
+                            try:
+                                mask = tracked_objects_info[track_id]['segmentation_mask']
+                                h, w = frame.shape[:2]
+                                # Convert to a binary mask of the correct size to find contours
+                                if len(mask.shape) == 2 and mask.shape[0] > 0 and mask.shape[1] == 2:
+                                    points = mask.astype(np.int32)
+                                    binary_mask = np.zeros((h, w), dtype=np.uint8)
+                                    cv2.fillPoly(binary_mask, [points], 1)
+                                elif mask.shape[:2] == (h,w):
+                                    binary_mask = (mask > 0.5).astype(np.uint8)
+                                else:
+                                    resized_mask = cv2.resize(mask.astype(np.float32), (w, h))
+                                    binary_mask = (resized_mask > 0.5).astype(np.uint8)
+
+                                contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                if contours:
+                                    # Find the largest contour and its center
+                                    largest_contour = max(contours, key=cv2.contourArea)
+                                    M = cv2.moments(largest_contour)
+                                    if M["m00"] > 0:
+                                        text_x = int(M["m10"] / M["m00"])
+                                        text_y = int(M["m01"] / M["m00"])
+                                        text_origin_set = True
+                            except Exception as e:
+                                logger.warning(f"Could not calculate mask centroid for track {track_id}: {e}")
+
+                        # Fallback to bounding box center if mask center fails or is not available
+                        if not text_origin_set:
+                            text_x = (x1 + x2) // 2
+                            text_y = (y1 + y2) // 2
+                        
+                        # --- Draw Text with Background ---
+                        (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, text_size, 1)
+                        
+                        # Center the text block on the calculated origin (text_x, text_y)
+                        rect_x1 = text_x - text_w // 2
+                        rect_y1 = text_y - text_h // 2
+                        rect_x2 = text_x + text_w // 2
+                        rect_y2 = text_y + text_h // 2
+
+                        cv2.rectangle(
+                            annotated,
+                            (rect_x1 - 2, rect_y1 - 2),
+                            (rect_x2 + 2, rect_y2 + 4),
+                            (0, 0, 0),  # black background
+                            -1
+                        )
+                        cv2.putText(
+                            annotated,
+                            label_text,
+                            (rect_x1, rect_y2),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            text_size,
+                            (255, 255, 255),  # white text
+                            1
+                        )
+
                     except Exception as e:
                         logger.exception(f"Error processing detection box: {e}")
                 self.annotated_frame_callback(annotated)
