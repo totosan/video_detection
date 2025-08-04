@@ -141,22 +141,33 @@ namespace Frontend
                 var userMessage = new ChatMessageContentItemCollection
                 {
                   new TextContent("""
-                  As a vision model, describe the image in detail. Identify the main objects and their positions.
+                  You are a vision model. Analyze the image and produce a JSON response that:
+                  1. Summarizes the scene in "description".
+                  2. Lists each object with its "name" and "ID".
+                  3. For each object, provides:
+                     - "position": spatial description (foreground/background, left/right, center).
+                     - "nearest": true if closest to the camera, else false.
+                     - "in_front_of": array of IDs this object is in front of.
+                     - "behind": array of IDs this object is behind.
 
                   Rules:
-                  - Provide a detailed description of the image.
-                  - For each object, describe its position using relative terms like "foreground", "background", "left", "right", "center", and "closest to the camera".
-                  - Be very specific about which object appears nearest to the viewer.
-                  - Use clear and concise language.
-                  - Keep it simple.
-                  
-                  Format:
-                    - Use JSON format for the response.
-                    - Include the following keys in the JSON response:
-                        - "description": "A summary of what the image depicts."
-                        - "objects": [
-                            { "name": "object_name", "ID": "object_id", "position": "A description of where the object is in the scene, including its relative distance." }
-                          ]
+                  - Specify relative depth: which objects overlap or are occluded.
+                  - Use concise, clear language in JSON values.
+                  - Maintain the following JSON structure:
+                    {
+                      "description": "...",
+                      "objects": [
+                        {
+                          "name": "...",
+                          "ID": "...",
+                          "position": "...",
+                          "nearest": true/false,
+                          "in_front_of": ["..."],
+                          "behind": ["..."]
+                        },
+                        ...
+                      ]
+                    }
                   """),
                     new ImageContent(new ReadOnlyMemory<byte>(Convert.FromBase64String(base64Image)), "image/jpeg")
                 };
