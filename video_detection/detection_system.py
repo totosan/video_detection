@@ -624,6 +624,116 @@ class DetectionSystem:
             return self.backend_annotation_enabled
     # ----------------------------------
 
+    # --- Single Image Processing ---
+    def process_single_image(self, cv_image, min_confidence=0.4, client_request_time=None):
+        """
+        Process a single image and return detection results in a format compatible with the API.
+        
+        Args:
+            cv_image: OpenCV image (numpy array)
+            min_confidence: Minimum confidence threshold for detections (default: 0.4)
+            client_request_time: Optional timestamp for request tracking
+            
+        Returns:
+            tuple: (detections_list, frame_shape) where detections_list contains detection dictionaries
+        """
+        if cv_image is None:
+            logger.warning("process_single_image: Input image is None")
+            return [], None
+            
+        try:
+            # Get frame shape
+            frame_shape = cv_image.shape[:2]  # (height, width)
+            
+            # Perform detection using the model directly (similar to ObjectDetector.process_frame)
+            # Determine device (similar to ObjectDetector logic)
+            import platform
+            import torch
+            
+            if platform.system() == "Darwin":  # macOS
+                device = 'mps'
+            elif platform.system() == "Linux":
+                if torch.cuda.is_available():
+                    device = 'cuda:0'
+                else:
+                    device = 'cpu'
+            else:
+                device = 'cpu'
+                
+            # Run detection with tracking (even for single images, to get consistent results)
+            track_args = {
+                "source": cv_image,
+                "persist": False,  # Don't persist tracking for single images
+                "verbose": False,
+                "conf": min_confidence,  # Use the provided confidence threshold
+                "device": device
+            }
+            
+            # Use custom tracker config if available
+            if hasattr(self, 'model') and CUSTOM_TRACKER_CONFIG:
+                track_args["tracker"] = CUSTOM_TRACKER_CONFIG
+                
+            results = self.model.track(**track_args)
+            
+            detections = []
+            
+            if results and hasattr(results[0], 'boxes') and results[0].boxes is not None:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                confs = results[0].boxes.conf.cpu().numpy()
+                clss = results[0].boxes.cls.cpu().numpy()
+                
+                # Check for segmentation masks
+                masks_xyn = None
+                if hasattr(results[0], 'masks') and results[0].masks is not None:
+                    if hasattr(results[0].masks, 'xyn') and results[0].masks.xyn is not None:
+                        masks_xyn = results[0].masks.xyn
+                        logger.debug(f"Found {len(masks_xyn)} segmentation masks")
+                
+                for i in range(len(boxes)):
+                    box = boxes[i]
+                    conf = float(confs[i])
+                    cls_idx = int(clss[i])
+                    
+                    # Apply confidence filtering again (belt and suspenders approach)
+                    if conf < min_confidence:
+                        continue
+                    
+                    # Get class label
+                    if hasattr(self.model, 'names') and cls_idx < len(self.model.names):
+                        label = self.model.names[cls_idx]
+                    else:
+                        label = f'class_{cls_idx}'
+                    
+                    # Convert bounding box to integer coordinates
+                    x1, y1, x2, y2 = map(int, box)
+                    
+                    # Create detection object in the expected format
+                    detection = {
+                        'label': label,
+                        'confidence': conf,
+                        'boundingBox': {
+                            'x': x1,
+                            'y': y1,
+                            'width': x2 - x1,
+                            'height': y2 - y1
+                        }
+                    }
+                    
+                    # Add segmentation mask if available
+                    if masks_xyn is not None and i < len(masks_xyn) and len(masks_xyn[i]) > 0:
+                        detection['mask_points'] = masks_xyn[i].tolist()
+                        detection['has_mask'] = True
+                    
+                    detections.append(detection)
+                    
+            logger.info(f"process_single_image: Processed image, found {len(detections)} detections above confidence {min_confidence}")
+            return detections, frame_shape
+            
+        except Exception as e:
+            logger.exception(f"Error in process_single_image: {e}")
+            return [], None
+    # ----------------------------------
+
     # --- Lifecycle Management ---
     def start(self):
         if self.single_image_mode:

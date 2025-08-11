@@ -701,6 +701,168 @@ def api_detect_objects():
     except Exception as e:
         logger.exception("API /api/detect: Error processing image")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/v1/vision/detection', methods=['POST'])
+def api_vision_detection():
+    """
+    REST API endpoint for object detection in uploaded images.
+    
+    Request: POST /v1/vision/detection
+    Content-Type: multipart/form-data
+    
+    Required Parameters:
+    - image: The image file to analyze
+    
+    Optional Parameters:
+    - min_confidence: Minimum confidence threshold (float, default: 0.4, range: 0.0-1.0)
+    
+    Response: JSON with success, message, count, predictions array and metadata
+    """
+    start_time = time.time()
+    print("API /v1/vision/detection: Received request for object detection.") 
+    logger.info("API /v1/vision/detection: Received request for object detection.") 
+    if 'image' not in request.files:
+        logger.warning("API /v1/vision/detection: No image file in request.")
+        return jsonify({
+            "success": False,
+            "message": "No image file provided",
+            "error": "No image file provided",
+            "predictions": [],
+            "count": 0,
+            "inferenceMs": 0,
+            "processMs": int((time.time() - start_time) * 1000),
+            "moduleId": "ObjectDetectionYOLOv11",
+            "moduleName": "Object Detection (YOLOv11)",
+            "command": "detect",
+            "executionProvider": "CPU",
+            "canUseGPU": True,
+            "analysisRoundTripMs": int((time.time() - start_time) * 1000)
+        }), 400
+
+    file = request.files['image']
+    if file.filename == '':
+        logger.warning("API /v1/vision/detection: No selected file.")
+        return jsonify({
+            "success": False,
+            "message": "No selected file",
+            "error": "No selected file",
+            "predictions": [],
+            "count": 0,
+            "inferenceMs": 0,
+            "processMs": int((time.time() - start_time) * 1000),
+            "moduleId": "ObjectDetectionYOLOv11",
+            "moduleName": "Object Detection (YOLOv11)",
+            "command": "detect",
+            "executionProvider": "CPU",
+            "canUseGPU": True,
+            "analysisRoundTripMs": int((time.time() - start_time) * 1000)
+        }), 400
+
+    # Get min_confidence parameter (default: 0.4)
+    min_confidence = float(request.form.get('min_confidence', 0.4))
+    min_confidence = max(0.0, min(1.0, min_confidence))  # Clamp to 0.0-1.0 range
+
+    try:
+        # Read image file into a numpy array
+        filestr = file.read()
+        npimg = np.frombuffer(filestr, np.uint8)
+        cv_image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+
+        if cv_image is None:
+            logger.error("API /v1/vision/detection: Could not decode image.")
+            return jsonify({
+                "success": False,
+                "message": "Could not decode image",
+                "error": "Could not decode image",
+                "predictions": [],
+                "count": 0,
+                "inferenceMs": 0,
+                "processMs": int((time.time() - start_time) * 1000),
+                "moduleId": "ObjectDetectionYOLOv11",
+                "moduleName": "Object Detection (YOLOv11)",
+                "command": "detect",
+                "executionProvider": "CPU",
+                "canUseGPU": True,
+                "analysisRoundTripMs": int((time.time() - start_time) * 1000)
+            }), 400
+
+        # Process the image using the detection system
+        inference_start = time.time()
+        detections, _ = detection_system.process_single_image(cv_image, min_confidence=min_confidence)
+        inference_time = int((time.time() - inference_start) * 1000)
+        
+        # Convert detections to the requested format
+        predictions = []
+        detected_labels = []
+        
+        for detection in detections:
+            confidence = detection.get("confidence", 0.0)
+            
+            # Apply confidence filtering
+            if confidence >= min_confidence:
+                label = detection.get("label", "unknown")
+                bbox = detection.get("boundingBox", {"x": 0, "y": 0, "width": 0, "height": 0})
+                
+                prediction = {
+                    "label": label,
+                    "confidence": round(confidence, 3),
+                    "x_min": bbox.get("x", 0),
+                    "y_min": bbox.get("y", 0),
+                    "x_max": bbox.get("x", 0) + bbox.get("width", 0),
+                    "y_max": bbox.get("y", 0) + bbox.get("height", 0)
+                }
+                predictions.append(prediction)
+                detected_labels.append(label)
+        
+        # Create human-readable message
+        if len(predictions) == 0:
+            message = "No objects detected"
+        elif len(predictions) == 1:
+            message = f"Found {detected_labels[0]}"
+        else:
+            unique_labels = list(set(detected_labels))
+            if len(unique_labels) <= 3:
+                message = f"Found {', '.join(unique_labels)}"
+            else:
+                message = f"Found {', '.join(unique_labels[:3])}..."
+        
+        process_time = int((time.time() - start_time) * 1000)
+        
+        logger.info(f"API /v1/vision/detection: Processed {file.filename}, found {len(predictions)} objects above confidence {min_confidence}.")
+        
+        return jsonify({
+            "success": True,
+            "message": message,
+            "predictions": predictions,
+            "count": len(predictions),
+            "inferenceMs": inference_time,
+            "processMs": process_time,
+            "moduleId": "ObjectDetectionYOLOv11",
+            "moduleName": "Object Detection (YOLOv11)",
+            "command": "detect",
+            "executionProvider": "CPU",
+            "canUseGPU": True,
+            "analysisRoundTripMs": process_time
+        })
+
+    except Exception as e:
+        logger.exception("API /v1/vision/detection: Error processing image")
+        process_time = int((time.time() - start_time) * 1000)
+        return jsonify({
+            "success": False,
+            "message": f"Processing error: {str(e)}",
+            "error": f"Processing error: {str(e)}",
+            "predictions": [],
+            "count": 0,
+            "inferenceMs": 0,
+            "processMs": process_time,
+            "moduleId": "ObjectDetectionYOLOv11",
+            "moduleName": "Object Detection (YOLOv11)",
+            "command": "detect",
+            "executionProvider": "CPU",
+            "canUseGPU": True,
+            "analysisRoundTripMs": process_time
+        }), 500
 # ---------------------------------------------
 
 # --- API Endpoints ---
@@ -878,7 +1040,7 @@ if __name__ == '__main__':
         
         # Get host and port from environment variables or use defaults
         host = os.environ.get('FLASK_RUN_HOST', '0.0.0.0')
-        port = int(os.environ.get('FLASK_RUN_PORT', 3000))
+        port = int(os.environ.get('FLASK_RUN_PORT', 8082))
         
         app.run(host=host, port=port, debug=False, use_reloader=False) # use_reloader=False is important for threads
 
