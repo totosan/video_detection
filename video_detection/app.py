@@ -14,6 +14,8 @@ import signal
 import io # Added for image byte handling
 import zmq # <--- ADDED IMPORT
 import json # <--- ADDED IMPORT (was missing in previous thought, but present in my last code generation for app.py)
+import socket # For hostname
+from datetime import datetime # For timestamp
 
 # Import static config and the new system manager
 from config import STATIC_FOLDER, TEMPLATE_FOLDER, RTSP_STREAM_URL # Only import static config
@@ -716,11 +718,15 @@ def api_vision_detection():
     Optional Parameters:
     - min_confidence: Minimum confidence threshold (float, default: 0.4, range: 0.0-1.0)
     
-    Response: JSON with success, message, count, predictions array and metadata
+    Response: JSON following the specified schema with success, message, predictions array and metadata
     """
     start_time = time.time()
+    hostname = socket.gethostname()
+    timestamp_utc = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    
     print("API /v1/vision/detection: Received request for object detection.") 
     logger.info("API /v1/vision/detection: Received request for object detection.") 
+    
     if 'image' not in request.files:
         logger.warning("API /v1/vision/detection: No image file in request.")
         return jsonify({
@@ -728,15 +734,15 @@ def api_vision_detection():
             "message": "No image file provided",
             "error": "No image file provided",
             "predictions": [],
-            "count": 0,
             "inferenceMs": 0,
             "processMs": int((time.time() - start_time) * 1000),
             "moduleId": "ObjectDetectionYOLOv11",
             "moduleName": "Object Detection (YOLOv11)",
             "command": "detect",
-            "executionProvider": "CPU",
-            "canUseGPU": True,
-            "analysisRoundTripMs": int((time.time() - start_time) * 1000)
+            "inferenceDevice": "CPU",
+            "analysisRoundTripMs": int((time.time() - start_time) * 1000),
+            "processedBy": hostname,
+            "timestampUTC": timestamp_utc
         }), 400
 
     file = request.files['image']
@@ -747,15 +753,15 @@ def api_vision_detection():
             "message": "No selected file",
             "error": "No selected file",
             "predictions": [],
-            "count": 0,
             "inferenceMs": 0,
             "processMs": int((time.time() - start_time) * 1000),
             "moduleId": "ObjectDetectionYOLOv11",
             "moduleName": "Object Detection (YOLOv11)",
             "command": "detect",
-            "executionProvider": "CPU",
-            "canUseGPU": True,
-            "analysisRoundTripMs": int((time.time() - start_time) * 1000)
+            "inferenceDevice": "CPU",
+            "analysisRoundTripMs": int((time.time() - start_time) * 1000),
+            "processedBy": hostname,
+            "timestampUTC": timestamp_utc
         }), 400
 
     # Get min_confidence parameter (default: 0.4)
@@ -775,15 +781,15 @@ def api_vision_detection():
                 "message": "Could not decode image",
                 "error": "Could not decode image",
                 "predictions": [],
-                "count": 0,
                 "inferenceMs": 0,
                 "processMs": int((time.time() - start_time) * 1000),
                 "moduleId": "ObjectDetectionYOLOv11",
                 "moduleName": "Object Detection (YOLOv11)",
                 "command": "detect",
-                "executionProvider": "CPU",
-                "canUseGPU": True,
-                "analysisRoundTripMs": int((time.time() - start_time) * 1000)
+                "inferenceDevice": "CPU",
+                "analysisRoundTripMs": int((time.time() - start_time) * 1000),
+                "processedBy": hostname,
+                "timestampUTC": timestamp_utc
             }), 400
 
         # Process the image using the detection system
@@ -801,15 +807,26 @@ def api_vision_detection():
             # Apply confidence filtering
             if confidence >= min_confidence:
                 label = detection.get("label", "unknown")
-                bbox = detection.get("boundingBox", {"x": 0, "y": 0, "width": 0, "height": 0})
+                # Handle both box formats - try box first, then boundingBox
+                box = detection.get("box")
+                if box and len(box) >= 4:
+                    # Direct box format: [x_min, y_min, x_max, y_max]
+                    x_min, y_min, x_max, y_max = box[:4]
+                else:
+                    # BoundingBox format: {"x": x, "y": y, "width": w, "height": h}
+                    bbox = detection.get("boundingBox", {"x": 0, "y": 0, "width": 0, "height": 0})
+                    x_min = bbox.get("x", 0)
+                    y_min = bbox.get("y", 0)
+                    x_max = x_min + bbox.get("width", 0)
+                    y_max = y_min + bbox.get("height", 0)
                 
                 prediction = {
                     "label": label,
                     "confidence": round(confidence, 3),
-                    "x_min": bbox.get("x", 0),
-                    "y_min": bbox.get("y", 0),
-                    "x_max": bbox.get("x", 0) + bbox.get("width", 0),
-                    "y_max": bbox.get("y", 0) + bbox.get("height", 0)
+                    "x_min": int(x_min),
+                    "y_min": int(y_min),
+                    "x_max": int(x_max),
+                    "y_max": int(y_max)
                 }
                 predictions.append(prediction)
                 detected_labels.append(label)
@@ -834,15 +851,15 @@ def api_vision_detection():
             "success": True,
             "message": message,
             "predictions": predictions,
-            "count": len(predictions),
             "inferenceMs": inference_time,
             "processMs": process_time,
             "moduleId": "ObjectDetectionYOLOv11",
             "moduleName": "Object Detection (YOLOv11)",
             "command": "detect",
-            "executionProvider": "CPU",
-            "canUseGPU": True,
-            "analysisRoundTripMs": process_time
+            "inferenceDevice": "CPU",
+            "analysisRoundTripMs": process_time,
+            "processedBy": hostname,
+            "timestampUTC": timestamp_utc
         })
 
     except Exception as e:
@@ -853,15 +870,15 @@ def api_vision_detection():
             "message": f"Processing error: {str(e)}",
             "error": f"Processing error: {str(e)}",
             "predictions": [],
-            "count": 0,
             "inferenceMs": 0,
             "processMs": process_time,
             "moduleId": "ObjectDetectionYOLOv11",
             "moduleName": "Object Detection (YOLOv11)",
             "command": "detect",
-            "executionProvider": "CPU",
-            "canUseGPU": True,
-            "analysisRoundTripMs": process_time
+            "inferenceDevice": "CPU",
+            "analysisRoundTripMs": process_time,
+            "processedBy": hostname,
+            "timestampUTC": timestamp_utc
         }), 500
 # ---------------------------------------------
 
