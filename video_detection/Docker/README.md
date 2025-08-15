@@ -20,6 +20,18 @@ This directory contains Docker configurations for building and running the video
   - Optimized threading settings
   - CPU-specific optimizations
 
+### 3. NVIDIA Jetson Nano (ARM64)
+- **Dockerfile**: `Dockerfile.jetson`
+- **Build Script**: `build-jetson.sh`
+- **Docker Compose**: `docker-compose.jetson.yml`
+- **Target**: NVIDIA Jetson Nano devices (ARM64)
+- **Features**:
+  - L4T (Linux for Tegra) base image
+  - CUDA 10.2 and GPU acceleration support
+  - ARM64-optimized PyTorch wheels
+  - Jetson-specific system libraries
+  - Hardware video acceleration support
+
 ## Quick Start
 
 ### Using Build Scripts
@@ -38,6 +50,13 @@ This directory contains Docker configurations for building and running the video
    ./build-intel-optimized.sh
    ```
 
+3. **Build Jetson Nano Image**:
+   ```bash
+   cd Docker
+   chmod +x build-jetson.sh
+   ./build-jetson.sh
+   ```
+
 ### Using Docker Compose
 
 1. **Standard Intel Image**:
@@ -48,6 +67,11 @@ This directory contains Docker configurations for building and running the video
 2. **Optimized Intel Image**:
    ```bash
    docker-compose -f Docker/docker-compose.intel.yml --profile optimized up -d video-detection-intel-optimized
+   ```
+
+3. **Jetson Nano Image**:
+   ```bash
+   docker-compose -f Docker/docker-compose.jetson.yml up -d video-detection-jetson
    ```
 
 ### Manual Docker Build

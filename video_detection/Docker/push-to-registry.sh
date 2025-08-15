@@ -50,6 +50,7 @@ echo
 build_and_push() {
     local variant="$1"
     local dockerfile="$2"
+    local platform="$3"
     
     echo -e "${YELLOW}Building and pushing ${variant} variant...${NC}"
     
@@ -57,9 +58,9 @@ build_and_push() {
     local latest_tag="${full_image_name}:${variant}-latest"
     local version_tag="${full_image_name}:${variant}-${VERSION}"
     
-    echo "Building ${dockerfile}..."
+    echo "Building ${dockerfile} for platform ${platform}..."
     docker build \
-        --platform linux/amd64 \
+        --platform "${platform}" \
         -f "Docker/${dockerfile}" \
         -t "${latest_tag}" \
         -t "${version_tag}" \
@@ -86,19 +87,29 @@ echo
 echo "Which variants would you like to build and push?"
 echo "1) Intel standard only"
 echo "2) Intel optimized only"
-echo "3) Both variants"
-read -p "Enter your choice (1-3): " choice
+echo "3) Jetson Nano only"
+echo "4) Intel variants (standard + optimized)"
+echo "5) All variants (Intel + Jetson)"
+read -p "Enter your choice (1-5): " choice
 
 case $choice in
     1)
-        build_and_push "intel" "Dockerfile.intel"
+        build_and_push "intel" "Dockerfile.intel" "linux/amd64"
         ;;
     2)
-        build_and_push "intel-optimized" "Dockerfile.intel-optimized"
+        build_and_push "intel-optimized" "Dockerfile.intel-optimized" "linux/amd64"
         ;;
     3)
-        build_and_push "intel" "Dockerfile.intel"
-        build_and_push "intel-optimized" "Dockerfile.intel-optimized"
+        build_and_push "jetson-nano" "Dockerfile.jetson" "linux/arm64"
+        ;;
+    4)
+        build_and_push "intel" "Dockerfile.intel" "linux/amd64"
+        build_and_push "intel-optimized" "Dockerfile.intel-optimized" "linux/amd64"
+        ;;
+    5)
+        build_and_push "intel" "Dockerfile.intel" "linux/amd64"
+        build_and_push "intel-optimized" "Dockerfile.intel-optimized" "linux/amd64"
+        build_and_push "jetson-nano" "Dockerfile.jetson" "linux/arm64"
         ;;
     *)
         echo -e "${RED}Invalid choice. Exiting.${NC}"
@@ -111,5 +122,6 @@ echo
 echo "You can now pull your images with:"
 echo "  docker pull ${REGISTRY}/${OWNER}/${IMAGE_NAME}:intel-latest"
 echo "  docker pull ${REGISTRY}/${OWNER}/${IMAGE_NAME}:intel-optimized-latest"
+echo "  docker pull ${REGISTRY}/${OWNER}/${IMAGE_NAME}:jetson-nano-latest"
 echo
 echo "Or view them at: https://github.com/${OWNER}?tab=packages&repo_name=${IMAGE_NAME}"

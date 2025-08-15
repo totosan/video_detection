@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  video-detection-jetson:
+    build:
+      context: ../
+      dockerfile: Docker/Dockerfile.jetson
+      platforms:
+        - linux/arm64
+    image: video-detection:jetson-nano
+    container_name: video-detection-jetson
+    restart: unless-stopped
+    runtime: nvidia  # Required for GPU access on Jetson
+    ports:
+      - "8082:8082"  # Flask API
+      - "5555:5555"  # ZeroMQ image endpoint
+      - "5556:5556"  # ZeroMQ results endpoint
+    devices:
+      - /dev/video0:/dev/video0  # Camera access (adjust device as needed)
+    volumes:
+      - ../Snapshots:/video_detection/Snapshots  # Persistent snapshot storage
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw  # X11 forwarding if needed
+    environment:
+      - FLASK_RUN_HOST=0.0.0.0
+      - FLASK_RUN_PORT=8082
+      - DETECTION_IMAGE_ENDPOINT=tcp://*:5555
+      - DETECTION_RESULTS_ENDPOINT=tcp://*:5556
+      - DISPLAY=${DISPLAY}  # X11 display forwarding
+    networks:
+      - video-detection-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/api/status"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 180s
+
+networks:
+  video-detection-network:
+    driver: bridge

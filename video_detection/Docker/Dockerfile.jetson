@@ -1,0 +1,123 @@
+# Multi-stage build for NVIDIA Jetson Nano (ARM64/aarch64)
+# Use NVIDIA L4T base image for Jetson Nano compatibility
+FROM nvcr.io/nvidia/l4t-base:r32.7.1 AS base
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    CUDA_HOME="/usr/local/cuda" \
+    PATH="/usr/local/cuda/bin:${PATH}" \
+    LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+
+# Install system dependencies for Jetson Nano
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    python3-setuptools \
+    python3-wheel \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libgstreamer1.0-0 \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav \
+    libgstreamer-plugins-base1.0-0 \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    libv4l-dev \
+    v4l-utils \
+    pkg-config \
+    wget \
+    curl \
+    build-essential \
+    cmake \
+    libopencv-dev \
+    libopencv-contrib-dev \
+    libhdf5-serial-dev \
+    hdf5-tools \
+    libhdf5-dev \
+    zlib1g-dev \
+    zip \
+    libjpeg8-dev \
+    liblapack-dev \
+    libblas-dev \
+    gfortran \
+    libatlas-base-dev \
+    libfreetype6-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create symlink for python (Jetson uses python3 by default)
+RUN ln -sf /usr/bin/python3 /usr/bin/python
+
+# Stage 2: Application setup
+FROM base AS app
+
+# Create app user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Set working directory
+WORKDIR /video_detection
+
+# Copy requirements first for better caching
+COPY requirements.txt pyproject.toml ./
+
+# Install Python dependencies optimized for Jetson Nano ARM architecture
+RUN python3 -m pip install --upgrade pip setuptools wheel && \
+    # Install numpy first (required by many other packages)
+    pip3 install --no-cache-dir numpy==1.21.* && \
+    # Install core dependencies
+    pip3 install --no-cache-dir -r requirements.txt && \
+    pip3 install --no-cache-dir pyzmq
+
+# Install PyTorch for Jetson Nano
+# Use NVIDIA's official PyTorch wheel for Jetson (includes CUDA support)
+RUN wget -q --no-check-certificate \
+    https://developer.download.nvidia.com/compute/redist/jp/v461/pytorch/torch-1.10.0a0+git36449ea-cp36-cp36m-linux_aarch64.whl \
+    -O torch-jetson.whl && \
+    pip3 install --no-cache-dir torch-jetson.whl && \
+    rm torch-jetson.whl || \
+    # Fallback to CPU-only version if Jetson wheel fails
+    pip3 install --no-cache-dir torch==1.10.* torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Install OpenCV optimized for ARM (use system OpenCV when possible)
+RUN pip3 install --no-cache-dir opencv-python-headless==4.5.*
+
+# Copy application code
+COPY --chown=appuser:appuser . .
+
+# Create necessary directories
+RUN mkdir -p /video_detection/static /video_detection/Snapshots && \
+    chown -R appuser:appuser /video_detection
+
+# Download YOLO model if not present
+RUN if [ ! -f "yolo11n-seg.pt" ]; then \
+    wget -O yolo11n-seg.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt; \
+    fi
+
+# Switch to non-root user
+USER appuser
+
+# Health check (longer intervals for slower ARM processor)
+HEALTHCHECK --interval=60s --timeout=30s --start-period=180s --retries=3 \
+    CMD curl -f http://localhost:8082/api/status || exit 1
+
+# Expose port
+EXPOSE 8082 5555 5556
+
+# Set default environment variables
+ENV FLASK_RUN_HOST=0.0.0.0 \
+    FLASK_RUN_PORT=8082 \
+    DETECTION_IMAGE_ENDPOINT="tcp://*:5555" \
+    DETECTION_RESULTS_ENDPOINT="tcp://*:5556"
+
+# Run the application
+ENTRYPOINT ["python3", "app.py"]
