@@ -29,6 +29,144 @@ os.makedirs(STATIC_FOLDER, exist_ok=True)
 # Get logger
 logger = logging.getLogger(__name__) # Use module name for logger
 
+# Create a separate logger for request logging
+request_logger = logging.getLogger('flask_requests')
+request_logger.setLevel(logging.INFO)
+
+# Add file handler for request logs if not already present
+if not request_logger.handlers:
+    # Create logs directory if it doesn't exist
+    log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Add file handler for request logs
+    request_log_file = os.path.join(log_dir, 'requests.log')
+    file_handler = logging.FileHandler(request_log_file)
+    file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    request_logger.addHandler(file_handler)
+    
+    # Also add console handler for immediate visibility
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)  # Only show warnings and errors on console
+    console_handler.setFormatter(formatter)
+    request_logger.addHandler(console_handler)
+
+# Add request logging middleware
+@app.before_request
+def log_request_info():
+    """Log all incoming requests"""
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    user_agent = request.headers.get('User-Agent', 'Unknown')
+    content_type = request.headers.get('Content-Type', 'None')
+    
+    # Log the basic request info
+    request_logger.info(f"Request: {request.method} {request.url} from {client_ip} - User-Agent: {user_agent}")
+    
+    # Log suspicious patterns
+    if user_agent == 'Unknown' or not user_agent:
+        request_logger.warning(f"SUSPICIOUS: No User-Agent header from {client_ip} to {request.url}")
+    
+    # Log potential bot traffic
+    bot_indicators = ['bot', 'crawler', 'spider', 'scraper']
+    if any(indicator.lower() in user_agent.lower() for indicator in bot_indicators):
+        request_logger.info(f"BOT DETECTED: {user_agent} from {client_ip} to {request.url}")
+    
+    # Log multipart requests (image uploads)
+    if 'multipart/form-data' in content_type:
+        request_logger.info(f"FILE UPLOAD: {request.method} {request.url} from {client_ip} - Content-Type: {content_type}")
+
+@app.after_request
+def log_response_info(response):
+    """Log all responses, especially rejected ones"""
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    
+    # Log rejected requests (4xx and 5xx status codes)
+    if response.status_code >= 400:
+        request_logger.warning(f"REJECTED: {request.method} {request.url} from {client_ip} - Status: {response.status_code} - Content-Length: {response.content_length}")
+        
+        # For specific error types, add more detailed logging
+        if response.status_code == 400:
+            request_logger.warning(f"BAD REQUEST: {request.method} {request.url} - Likely missing or invalid parameters")
+        elif response.status_code == 404:
+            request_logger.warning(f"NOT FOUND: {request.method} {request.url} - Endpoint does not exist")
+        elif response.status_code >= 500:
+            request_logger.error(f"SERVER ERROR: {request.method} {request.url} - Status: {response.status_code}")
+    else:
+        # Log successful requests at debug level
+        request_logger.debug(f"SUCCESS: {request.method} {request.url} from {client_ip} - Status: {response.status_code}")
+    
+    return response
+
+# Error handler for 404 (Not Found)
+@app.errorhandler(404)
+def not_found_error(error):
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    request_logger.warning(f"404 NOT FOUND: {request.method} {request.url} from {client_ip} - Endpoint does not exist")
+    return jsonify({"error": "Endpoint not found", "status": 404}), 404
+
+# Error handler for 405 (Method Not Allowed)
+@app.errorhandler(405)
+def method_not_allowed_error(error):
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    request_logger.warning(f"405 METHOD NOT ALLOWED: {request.method} {request.url} from {client_ip} - Method not supported for this endpoint")
+    return jsonify({"error": "Method not allowed", "status": 405, "allowed_methods": error.description}), 405
+
+# Error handler for 500 (Internal Server Error)
+@app.errorhandler(500)
+def internal_server_error(error):
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    request_logger.error(f"500 INTERNAL SERVER ERROR: {request.method} {request.url} from {client_ip} - {str(error)}")
+    return jsonify({"error": "Internal server error", "status": 500}), 500
+
+# Simple rate limiting storage (in production, use Redis or similar)
+request_counts = {}
+REQUEST_LIMIT = 100  # requests per minute per IP
+TIME_WINDOW = 60  # seconds
+
+def rate_limit_check(client_ip):
+    """Check if client has exceeded rate limit"""
+    current_time = time.time()
+    
+    # Clean old entries
+    for ip in list(request_counts.keys()):
+        request_counts[ip] = [(req_time, count) for req_time, count in request_counts.get(ip, []) 
+                             if current_time - req_time < TIME_WINDOW]
+        if not request_counts[ip]:
+            del request_counts[ip]
+    
+    # Count requests for this IP in the time window
+    ip_requests = request_counts.get(client_ip, [])
+    total_requests = sum(count for _, count in ip_requests)
+    
+    if total_requests >= REQUEST_LIMIT:
+        return False
+    
+    # Add this request
+    if client_ip not in request_counts:
+        request_counts[client_ip] = []
+    request_counts[client_ip].append((current_time, 1))
+    
+    return True
+
+def rate_limited_endpoint(f):
+    """Decorator to add rate limiting to endpoints"""
+    def wrapper(*args, **kwargs):
+        client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+        
+        if not rate_limit_check(client_ip):
+            request_logger.warning(f"RATE LIMITED: {request.method} {request.url} from {client_ip} - Exceeded {REQUEST_LIMIT} requests per minute")
+            return jsonify({
+                "error": "Rate limit exceeded", 
+                "message": f"Maximum {REQUEST_LIMIT} requests per minute allowed",
+                "status": 429
+            }), 429
+        
+        return f(*args, **kwargs)
+    wrapper.__name__ = f.__name__
+    return wrapper
+
 # Ensure all loggers respect the global logging level
 for logger_name in logging.root.manager.loggerDict:
     logging.getLogger(logger_name).setLevel(logging.INFO)
@@ -664,6 +802,7 @@ def get_object_filter():
 
 # --- API Endpoint for Single Image Detection ---
 @app.route('/api/detect', methods=['POST'])
+@rate_limited_endpoint
 def api_detect_objects():
     """
     API endpoint to detect objects in an uploaded image.
@@ -674,14 +813,27 @@ def api_detect_objects():
     Each object in the list is a dictionary, e.g.:
     {'box': [x_min, y_min, x_max, y_max], 'label': 'person', 'confidence': 0.9}
     """
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    
     if 'image' not in request.files:
-        logger.warning("API /api/detect: No image file in request.")
+        request_logger.warning(f"API /api/detect: No image file in request from {client_ip}")
         return jsonify({"error": "No image file provided"}), 400
 
     file = request.files['image']
     if file.filename == '':
-        logger.warning("API /api/detect: No selected file.")
+        request_logger.warning(f"API /api/detect: No selected file from {client_ip}")
         return jsonify({"error": "No selected file"}), 400
+    
+    # Log file details
+    file_size = len(file.read())
+    file.seek(0)  # Reset file pointer
+    request_logger.info(f"API /api/detect: Processing file '{file.filename}' ({file_size} bytes) from {client_ip}")
+    
+    # Check file size limits (e.g., 10MB)
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+    if file_size > MAX_FILE_SIZE:
+        request_logger.warning(f"API /api/detect: File too large ({file_size} bytes) from {client_ip}")
+        return jsonify({"error": f"File too large. Maximum size is {MAX_FILE_SIZE} bytes"}), 400
 
     try:
         # Read image file into a numpy array
@@ -705,6 +857,7 @@ def api_detect_objects():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/v1/vision/detection', methods=['POST'])
+@rate_limited_endpoint
 def api_vision_detection():
     """
     REST API endpoint for object detection in uploaded images.
