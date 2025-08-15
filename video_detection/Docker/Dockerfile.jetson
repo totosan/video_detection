@@ -71,25 +71,37 @@ WORKDIR /video_detection
 COPY requirements.txt pyproject.toml ./
 
 # Install Python dependencies optimized for Jetson Nano ARM architecture
+# Install system-level numpy first to avoid compilation issues
+RUN apt-get update && apt-get install -y \
+    python3-numpy \
+    python3-scipy \
+    python3-matplotlib \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Upgrade pip and install Python packages
 RUN python3 -m pip install --upgrade pip setuptools wheel && \
-    # Install numpy first (required by many other packages)
-    pip3 install --no-cache-dir numpy==1.21.* && \
-    # Install core dependencies
-    pip3 install --no-cache-dir -r requirements.txt && \
+    # Install core dependencies from requirements, skipping numpy since we have system version
+    grep -v "numpy" requirements.txt | pip3 install --no-cache-dir -r /dev/stdin && \
     pip3 install --no-cache-dir pyzmq
 
 # Install PyTorch for Jetson Nano
-# Use NVIDIA's official PyTorch wheel for Jetson (includes CUDA support)
-RUN wget -q --no-check-certificate \
-    https://developer.download.nvidia.com/compute/redist/jp/v461/pytorch/torch-1.10.0a0+git36449ea-cp36-cp36m-linux_aarch64.whl \
-    -O torch-jetson.whl && \
-    pip3 install --no-cache-dir torch-jetson.whl && \
-    rm torch-jetson.whl || \
-    # Fallback to CPU-only version if Jetson wheel fails
-    pip3 install --no-cache-dir torch==1.10.* torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu
+# For GitHub Actions ARM64 emulation, use CPU-only version to avoid build issues
+# On real Jetson hardware, this can be replaced with CUDA-enabled wheels
+RUN pip3 install --no-cache-dir \
+    torch==1.13.* \
+    torchvision==0.14.* \
+    --extra-index-url https://download.pytorch.org/whl/cpu || \
+    # Fallback to even lighter CPU version if needed
+    pip3 install --no-cache-dir torch torchvision --extra-index-url https://download.pytorch.org/whl/cpu
 
-# Install OpenCV optimized for ARM (use system OpenCV when possible)
-RUN pip3 install --no-cache-dir opencv-python-headless==4.5.*
+# Install OpenCV - use system version for better ARM64 compatibility
+RUN apt-get update && apt-get install -y \
+    python3-opencv \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean || \
+    # Fallback to pip version if system opencv fails
+    pip3 install --no-cache-dir opencv-python-headless==4.8.*
 
 # Copy application code
 COPY --chown=appuser:appuser . .

@@ -112,8 +112,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
 
       - name: Log in to Container Registry
         uses: docker/login-action@v3
@@ -137,13 +145,15 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./video_detection
-          file: ./video_detection/Docker/Dockerfile.jetson
+          file: ./video_detection/Docker/Dockerfile.jetson-ci
           platforms: linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
 
   create-multi-arch-manifest:
     runs-on: ubuntu-latest
