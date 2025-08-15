@@ -26,6 +26,7 @@ services:
       - DETECTION_IMAGE_ENDPOINT=tcp://*:5555
       - DETECTION_RESULTS_ENDPOINT=tcp://*:5556
       - DISPLAY=${DISPLAY}  # X11 display forwarding
+      - LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1
     networks:
       - video-detection-network
     healthcheck:
