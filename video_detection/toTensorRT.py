@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 
-modelname = "yolo12n"  # Model name
+modelname = "yolo11n"  # Model name
 
 # Load a YOLO11n PyTorch model
 model = YOLO(f"{modelname}.pt")
