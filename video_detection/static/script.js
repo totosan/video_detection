@@ -21,6 +21,7 @@ const UPDATE_INTERVALS = {
 let originalFrameWidth = null;
 let originalFrameHeight = null;
 let currentObjectFilter = [];
+let currentTrackIdFilter = null; // Track ID filter (null = no filter, number = specific track ID)
 
 // DOM Elements (to be cached on DOMContentLoaded)
 let toggleBtn, statusSpan, debugRenderingContainer, videoFeed, canvas, ctx,
@@ -124,6 +125,10 @@ async function updateCurrentFilterStatusLabel() { // Primarily updates the statu
 
         const trackIdFilter = trackIdData.track_id_filter;
         const objectFilter = objectFilterData.object_filter || [];
+
+        // Update global state variables
+        currentTrackIdFilter = trackIdFilter;
+        currentObjectFilter = objectFilter;
 
         const filterStatusLabel = document.getElementById("currentFilterStatusLabel");
         if (filterStatusLabel) {
@@ -321,9 +326,14 @@ async function fetchAndDrawDetections() {
         const scaleY = canvas.height / (baseHeightForScale || 1);
 
         data.detections.forEach(det => {
-            // Use the global currentObjectFilter
-            if (currentObjectFilter.length > 0 && !currentObjectFilter.includes(det.label)) {
-                return; // Skip if filter is active and label doesn\'t match
+            // Apply track ID filter first (takes priority over label filter)
+            if (currentTrackIdFilter !== null && det.track_id !== currentTrackIdFilter) {
+                return; // Skip if track ID filter is active and this detection doesn't match
+            }
+
+            // Apply object label filter (only if track ID filter is not active)
+            if (currentTrackIdFilter === null && currentObjectFilter.length > 0 && !currentObjectFilter.includes(det.label)) {
+                return; // Skip if label filter is active and label doesn't match
             }
 
             const [x1, y1, x2, y2] = det.box; // Still useful for label positioning
@@ -666,6 +676,7 @@ function initializeApp() {
     updateCurrentFilterStatusLabel(); // Get initial filter state for the status label
     fetchAvailableCameras();
     fetchTrackingStatus();
+    updateTrackedObjectsList(); // Initial call to populate tracked objects list
 
     // Setup event listeners
     setupDebugRenderingToggle();
@@ -673,6 +684,10 @@ function initializeApp() {
     setupTrackIdFilterControls();
     setupTrackingToggle();
     setupCameraControls();
+
+    // Start periodic updates
+    setInterval(updateTrackedObjectsList, UPDATE_INTERVALS.TRACKED_OBJECTS); // Update tracked objects list every 1 second
+    setInterval(updateCurrentFilterStatusLabel, UPDATE_INTERVALS.FILTER_STATUS); // Update filter status every 5 seconds
 
     // Start the drawing loop
     requestAnimationFrame(fetchAndDrawDetections);

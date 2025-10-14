@@ -40,7 +40,7 @@ public class Program
         // Configure these to your Ollama setup
         //var ollamaMode_text_lId = "smollm2:latest"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaMode_text_lId = "llama3.2"; // Or your preferred model, e.g., "mistral", "phi3"
-        var ollamaMode_vision_lId = "moondream:latest"; // Or your preferred model, e.g., "mistral", "phi3"
+        var ollamaMode_vision_lId = "minicpm-v:8b"; // Changed from :latest to :8b (the actual installed version)
         //var ollamaMode_vision_lId = "llava-phi3:latest"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaBaseUrl = new Uri("http://localhost:11434"); // Default Ollama API endpoint
 
@@ -117,10 +117,24 @@ public class Program
         //var kernelTxt = kernel.Clone(); // Cloning will be conditional or handled differently
         //var kernelVis = kernel.Clone();
 
-        var settingsTxt = new OllamaPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(), ServiceId = "ollamaTxt" };
-        var settingsVis = new OllamaPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.None(), ServiceId = "ollamaVis" };
-        var settingsOpenAI = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(), ServiceId = "openAI" };
-        var settingsHuggingFace = new HuggingFacePromptExecutionSettings { ServiceId = "huggingFace" }; // FunctionChoiceBehavior not available
+        var settingsTxt = new OllamaPromptExecutionSettings { 
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(autoInvoke: true),
+            ServiceId = "ollamaTxt",
+            Temperature = 0.1f  // Lower temperature for more focused responses
+        };
+        var settingsVis = new OllamaPromptExecutionSettings { 
+            FunctionChoiceBehavior = FunctionChoiceBehavior.None(), 
+            ServiceId = "ollamaVis"
+        };
+        var settingsOpenAI = new OpenAIPromptExecutionSettings { 
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(autoInvoke: true),
+            ServiceId = "openAI",
+            Temperature = 0.1f,
+            MaxTokens = 500     // Limit response length to conserve context
+        };
+        var settingsHuggingFace = new HuggingFacePromptExecutionSettings { 
+            ServiceId = "huggingFace"
+        }; // FunctionChoiceBehavior not available
 
         // Retrieve the chat completion service
         var chatCompletionServiceOllamaTxt = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaTxt");
@@ -175,40 +189,33 @@ public class Program
 
 
         Console.WriteLine($"Chat with {(useOpenAI && chatCompletionServiceOpenAI != null ? "OpenAI" : (useHuggingFace && chatCompletionServiceHuggingFace != null ? "Hugging Face" : "Ollama"))} model (type 'exit' to quit):");
+        
+        // Add function invocation logging
+        activeKernel.FunctionInvocationFilters.Add(new FunctionInvocationLoggingFilter());
+        
         var chatHistory = new ChatHistory("""
-        You are a robot assistant. You perceive the world ONLY through the tools available to you. You have no memory of past sights.
+        Vision assistant. Track IDs are shown in the video image as labels like "person (ID: 1)".
 
-        **Your Tools and Their Purpose:**
+        TRACKING WORKFLOW:
+        1. User asks to follow/track an object
+        2. Call GetTheImage() - you'll see labels with IDs in the image
+        3. Read the ID from the visual label (e.g., "chair (ID: 3)" means ID is 3)
+        4. Call SetTrackIdFilterAsync(ID) with that exact integer ID
+        5. Confirm tracking
 
-        1.  `GetTheImage`: Your "eyes". Provides a detailed JSON description of the current scene, including objects and their relative positions (e.g., "closest", "left").
-            - **Use this when:** The user asks what you see, or asks to identify an object by its position.
+        LISTING:
+        "list objects" → GetCurrentDetectionsAsync() → report what you see
 
-        2.  `GetCurrentDetectionsAsync`: Your "object recognition system". Provides a definitive JSON list of all objects the system can track.
-            - **Use this when:** The user asks "what are the detected objects?" or "what objects can you track?".
-
-        3.  `SetObjectFilterAsync`: Your "hands". Allows you to select or highlight an object by its name.
-            - **Use this when:** You have identified an object's name and need to select it.
-
-        **Your Strict Workflow:**
-
-        -   **IF the user asks what you see OR asks to identify an object by position (e.g., "closest", "on the left"):**
-            1.  Call `GetTheImage`.
-            2.  Analyze the JSON result to find the object that matches the request.
-            3.  If the request was just to see, describe the scene based on the result.
-            4.  If the request was to select, extract the object's `"name"` and call `SetObjectFilterAsync` with that name.
-            5.  Report the result to the user (e.g., "I see a cup on the table." or "The mouse is closest. I have selected it.").
-
-        -   **IF the user asks "what are the detected objects?" or a similar question:**
-            1.  Call `GetCurrentDetectionsAsync`.
-            2.  State the list of detections from the tool's output to the user.
-
-        **Core Rules:**
-        -   **NEVER answer from memory.** If the user asks what you see, you MUST call `GetTheImage` again, even if you just did.
-        -   **NEVER invent information.** If a tool doesn't provide a piece of information, you don't know it.
-        -   **NEVER provide code or technical explanations.** You are a robot, not a programmer.
-        -   **ALWAYS respond based *only* on the most recent tool output.**
+        IMPORTANT: 
+        - IDs are visible IN THE IMAGE as text overlays
+        - Extract the ID number from what you see visually
+        - If multiple objects of same type, let user choose or pick based on position they specify
+        
+        Keep responses brief.
         """);
 
+        const int MAX_HISTORY_MESSAGES = 3; // Keep system message + last 10 exchanges
+        
         while (true)
         {
             Console.Write("User: ");
@@ -229,21 +236,42 @@ public class Program
 
             try
             {
-                var result = await activeChatService.GetChatMessageContentAsync(
+                // Trim chat history to prevent context overflow
+                // Keep system message (index 0) and last N messages
+                if (chatHistory.Count > MAX_HISTORY_MESSAGES + 1) // +1 for system message
+                {
+                    int messagesToRemove = chatHistory.Count - MAX_HISTORY_MESSAGES - 1;
+                    for (int i = 0; i < messagesToRemove; i++)
+                    {
+                        chatHistory.RemoveAt(1); // Always remove at index 1 (after system message)
+                    }
+                    Console.WriteLine($"[Context trimmed: Keeping last {MAX_HISTORY_MESSAGES} messages]");
+                }
+
+                // Use GetChatMessageContentsAsync to enable automatic function calling loop
+                // This will keep calling functions until the LLM provides a final answer
+                var results = await activeChatService.GetChatMessageContentsAsync(
                     chatHistory,
                     activeSettings,
-                    kernel: activeKernel // Use the correctly configured kernel
+                    kernel: activeKernel
                 ).ConfigureAwait(false);
-                var assistantResponse = result.Content;
+
+                // Get the final response (last message in the results)
+                var finalResult = results.LastOrDefault();
+                var assistantResponse = finalResult?.Content ?? "No response generated.";
 
                 Console.WriteLine($"Assistant: {assistantResponse}");
-                chatHistory.AddAssistantMessage(assistantResponse ?? string.Empty);
+                chatHistory.AddAssistantMessage(assistantResponse);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
                 // Optionally, remove the last user message if the API call failed to allow retry or different input
-                chatHistory.RemoveAt(chatHistory.Count - 1);
+                if (chatHistory.Count > 0)
+                {
+                    chatHistory.RemoveAt(chatHistory.Count - 1);
+                }
             }
         }
     }
@@ -405,6 +433,30 @@ public class Program
             Kernel = kernel,
             LoggerFactory = loggerFactory
         };
+}
+
+// Function invocation logging filter to track tool calls
+public class FunctionInvocationLoggingFilter : IFunctionInvocationFilter
+{
+    public async Task OnFunctionInvocationAsync(FunctionInvocationContext context, Func<FunctionInvocationContext, Task> next)
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine($"🔧 Calling tool: {context.Function.Name}");
+        
+        // Log parameters if any
+        if (context.Arguments.Count > 0)
+        {
+            Console.WriteLine($"   Parameters: {string.Join(", ", context.Arguments.Select(kvp => $"{kvp.Key}={kvp.Value}"))}");
+        }
+        
+        Console.ResetColor();
+        
+        await next(context);
+        
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"✅ Tool {context.Function.Name} completed");
+        Console.ResetColor();
+    }
 }
 
 #pragma warning restore SKEXP0070
