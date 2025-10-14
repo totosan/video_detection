@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__) # Use module name for logger
 
 # Create a separate logger for request logging
 request_logger = logging.getLogger('flask_requests')
-request_logger.setLevel(logging.INFO)
+request_logger.setLevel(logging.DEBUG)
 
 # Add file handler for request logs if not already present
 if not request_logger.handlers:
@@ -62,7 +62,7 @@ def log_request_info():
     content_type = request.headers.get('Content-Type', 'None')
     
     # Log the basic request info
-    request_logger.info(f"Request: {request.method} {request.url} from {client_ip} - User-Agent: {user_agent}")
+    request_logger.debug(f"Request: {request.method} {request.url} from {client_ip} - User-Agent: {user_agent}")
     
     # Log suspicious patterns
     if user_agent == 'Unknown' or not user_agent:
@@ -332,7 +332,7 @@ def generate_frames(lock, frame_source_func):
             # If getters handle locking, this lock might be redundant.
             # For now, assume getters are thread-safe and don't require external lock here.
             # with lock: # Re-evaluate if this lock is needed based on getter implementation
-            ret, buffer = cv2.imencode('.jpg', frame)
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 98])
             if not ret:
                 logger.warning("Could not encode frame to JPEG") # Use warning
                 continue
@@ -386,7 +386,7 @@ def api_tracked_objects():
         if 'detection_image' in info and info['detection_image'] is not None:
             logger.debug(f"Track ID {track_id}: Found detection image in tracked_info, encoding to base64")
             try:
-                ret, buffer = cv2.imencode('.jpg', info['detection_image'])
+                ret, buffer = cv2.imencode('.jpg', info['detection_image'], [cv2.IMWRITE_JPEG_QUALITY, 98])
                 if ret:
                     object_data['detection_image'] = base64.b64encode(buffer).decode('utf-8')
                 else:
@@ -463,9 +463,11 @@ def api_current_detections_light():
 
         if track_id_filter is not None:
             detections_for_api = [d for d in detections_for_api if d.get('track_id') == track_id_filter]
+            logger.debug(f"api_current_detections_light: Applied track_id filter: {track_id_filter}, {len(detections_for_api)} detections remain")
         
         if label_filter: # If the list is not empty
             detections_for_api = [d for d in detections_for_api if d.get('label') in label_filter]
+            logger.debug(f"api_current_detections_light: Applied label filter: {label_filter}, {len(detections_for_api)} detections remain")
         # --- End of Filters ---
 
         response_data = {
@@ -476,6 +478,32 @@ def api_current_detections_light():
         return jsonify(response_data)
     except Exception as e:
         logger.exception("API: Error getting or serializing current_detections_light data")
+        return jsonify({"error": "Failed to get current detections data", "detections": [], "frame_shape": None}), 500
+
+@app.route('/api/current_detections_unfiltered')
+def api_current_detections_unfiltered():
+    """API endpoint to get ALL current detections WITHOUT applying any filters.
+       This is intended for AI assistants and tools that need to see all objects
+       in the scene, even when a track ID or label filter is active for rendering.
+       This prevents the situation where setting a filter makes it impossible to
+       see what other objects are available to track.
+    """
+    try:
+        data_from_system = detection_system.get_current_detections_data()
+        
+        # Return detections WITHOUT applying any filters
+        detections_for_api = data_from_system.get('detections', [])
+        frame_shape_for_api = data_from_system.get('frame_shape', None)
+
+        response_data = {
+            'detections': detections_for_api,
+            'frame_shape': frame_shape_for_api
+        }
+        
+        logger.debug(f"api_current_detections_unfiltered: Returning {len(detections_for_api)} unfiltered detections")
+        return jsonify(response_data)
+    except Exception as e:
+        logger.exception("API: Error getting or serializing unfiltered current detections data")
         return jsonify({"error": "Failed to get current detections data", "detections": [], "frame_shape": None}), 500
 
 @app.route('/api/current_detections')
@@ -494,11 +522,11 @@ def api_current_detections():
         track_id_filter = detection_system.get_track_id_filter()
         label_filter = detection_system.get_label_filter()
 
-        if track_id_filter is not None:
-            detections_for_api = [d for d in detections_for_api if d.get('track_id') == track_id_filter]
-
-        if label_filter: # If the list is not empty
-            detections_for_api = [d for d in detections_for_api if d.get('label') in label_filter]
+      #  if track_id_filter is not None:
+      #      detections_for_api = [d for d in detections_for_api if d.get('track_id') == track_id_filter]
+#
+      #  if label_filter: # If the list is not empty
+      #      detections_for_api = [d for d in detections_for_api if d.get('label') in label_filter]
         # --- End of Filters ---
 
         # Add detection images (cropped regions) for each detection
@@ -518,7 +546,7 @@ def api_current_detections():
                         if x_max > x_min and y_max > y_min:
                             cropped_image = latest_frame_for_cropping[y_min:y_max, x_min:x_max]
                             if cropped_image.size > 0: # Check if cropped image is not empty
-                                ret, buffer = cv2.imencode('.jpg', cropped_image)
+                                ret, buffer = cv2.imencode('.jpg', cropped_image, [cv2.IMWRITE_JPEG_QUALITY, 98])
                                 if ret:
                                     detection['image'] = base64.b64encode(buffer).decode('utf-8')
                                 else:
@@ -618,7 +646,7 @@ def api_track_history():
                          detection_image = detection_system.get_detection_image(track_id)
                          if detection_image is not None:
                              # Convert the image to JPEG bytes
-                             ret, buffer = cv2.imencode('.jpg', detection_image)
+                             ret, buffer = cv2.imencode('.jpg', detection_image, [cv2.IMWRITE_JPEG_QUALITY, 98])
                              if ret:
                                  # Convert to base64 for JSON
                                  jpg_as_text = base64.b64encode(buffer).decode('utf-8')
@@ -665,7 +693,7 @@ def snapshot():
         logger.info("Snapshot: No frame available (neither annotated nor raw).")
         return ("No frame available", 503)
 
-    ret, buffer = cv2.imencode('.jpg', frame_to_send)
+    ret, buffer = cv2.imencode('.jpg', frame_to_send, [cv2.IMWRITE_JPEG_QUALITY, 98])
     if not ret:
         logger.error("Snapshot: Error encoding frame.")
         return ("Error encoding frame", 500)
@@ -714,7 +742,7 @@ def raw_snapshot():
         logger.error(f"Raw snapshot: Failed to grab frame from {source_to_open}.")
         return ("Failed to grab frame", 503)
     
-    ret2, buf = cv2.imencode('.jpg', frame)
+    ret2, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 98])
     if not ret2:
         logger.error(f"Raw snapshot: Error encoding frame from {source_to_open}.")
         return ("Error encoding frame", 500)
@@ -742,6 +770,90 @@ def tracking_status():
     except Exception as e:
         logger.exception("API: Error getting tracking status")
         return jsonify({"error": "Failed to get tracking status"}), 500
+
+# --- YOLO Object Tracking Control ---
+@app.route('/api/yolo_tracking/toggle', methods=['POST'])
+def toggle_yolo_tracking():
+    """API to toggle YOLO object tracking on/off."""
+    try:
+        new_status = detection_system.toggle_tracking()
+        return jsonify({"yolo_tracking_enabled": new_status}), 200
+    except Exception as e:
+        logger.exception("API: Error toggling YOLO tracking")
+        return jsonify({"error": "Failed to toggle YOLO tracking"}), 500
+
+@app.route('/api/yolo_tracking/enable', methods=['POST'])
+def enable_yolo_tracking():
+    """API to enable YOLO object tracking."""
+    try:
+        detection_system.enable_tracking()
+        return jsonify({"yolo_tracking_enabled": True}), 200
+    except Exception as e:
+        logger.exception("API: Error enabling YOLO tracking")
+        return jsonify({"error": "Failed to enable YOLO tracking"}), 500
+
+@app.route('/api/yolo_tracking/disable', methods=['POST'])
+def disable_yolo_tracking():
+    """API to disable YOLO object tracking."""
+    try:
+        detection_system.disable_tracking()
+        return jsonify({"yolo_tracking_enabled": False}), 200
+    except Exception as e:
+        logger.exception("API: Error disabling YOLO tracking")
+        return jsonify({"error": "Failed to disable YOLO tracking"}), 500
+
+@app.route('/api/yolo_tracking/status', methods=['GET'])
+def get_yolo_tracking_status():
+    """API to get the current status of YOLO object tracking."""
+    try:
+        status = detection_system.is_tracking_enabled()
+        return jsonify({"yolo_tracking_enabled": status}), 200
+    except Exception as e:
+        logger.exception("API: Error getting YOLO tracking status")
+        return jsonify({"error": "Failed to get YOLO tracking status"}), 500
+# -------------------------------------
+
+# --- Tracking Rendering Control ---
+@app.route('/api/render_tracking/toggle', methods=['POST'])
+def toggle_render_tracking():
+    """API to toggle rendering of tracking visualizations (track lines, IDs)."""
+    try:
+        new_status = detection_system.toggle_render_tracking()
+        return jsonify({"render_tracking_enabled": new_status}), 200
+    except Exception as e:
+        logger.exception("API: Error toggling render tracking")
+        return jsonify({"error": "Failed to toggle render tracking"}), 500
+
+@app.route('/api/render_tracking/enable', methods=['POST'])
+def enable_render_tracking():
+    """API to enable rendering of tracking visualizations."""
+    try:
+        detection_system.enable_render_tracking()
+        return jsonify({"render_tracking_enabled": True}), 200
+    except Exception as e:
+        logger.exception("API: Error enabling render tracking")
+        return jsonify({"error": "Failed to enable render tracking"}), 500
+
+@app.route('/api/render_tracking/disable', methods=['POST'])
+def disable_render_tracking():
+    """API to disable rendering of tracking visualizations."""
+    try:
+        detection_system.disable_render_tracking()
+        return jsonify({"render_tracking_enabled": False}), 200
+    except Exception as e:
+        logger.exception("API: Error disabling render tracking")
+        return jsonify({"error": "Failed to disable render tracking"}), 500
+
+@app.route('/api/render_tracking/status', methods=['GET'])
+def get_render_tracking_status():
+    """API to get the current status of tracking rendering."""
+    try:
+        status = detection_system.is_render_tracking_enabled()
+        return jsonify({"render_tracking_enabled": status}), 200
+    except Exception as e:
+        logger.exception("API: Error getting render tracking status")
+        return jsonify({"error": "Failed to get render tracking status"}), 500
+# -------------------------------------
 
 @app.route('/api/set_track_id_filter', methods=['POST'])
 def set_track_id_filter():
@@ -1113,9 +1225,13 @@ def select_closest_object():
         logger.info("No objects detected, cannot select closest.")
         return jsonify({"error": "No objects found to select from"}), 404
 
+# DUPLICATE ROUTE DISABLED - The route at line 483 is the active one
+# This duplicate definition was never being called by Flask (first route wins)
+# Keeping it commented for reference in case the implementation is needed later
+"""
 @app.route('/api/current_detections')
 def get_current_detections():
-    """Returns the current list of detected objects, optionally filtered."""
+    \"\"\"Returns the current list of detected objects, optionally filtered.\"\"\"
     try:
         # Get query parameters for filtering
         track_id_filter = request.args.get('track_id', type=int)
@@ -1152,6 +1268,7 @@ def get_current_detections():
     except Exception as e:
         logger.exception("API: Error getting current detections")
         return jsonify({"error": "Failed to get current detections"}), 500
+"""
 # ------------------------------------
 
 # --- Graceful Shutdown --- 

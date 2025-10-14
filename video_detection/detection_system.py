@@ -37,6 +37,17 @@ class DetectionSystem:
         logger.info(f"Initial filter state: track_id={self._active_track_id_filter}, labels={self._active_label_filter}")
         # --------------------
 
+        # --- Tracking State ---
+        self.tracking_enabled = True  # Default: tracking ON (but rendering OFF by default)
+        self.tracking_lock = threading.Lock()
+        logger.info(f"Initial tracking state: tracking_enabled={self.tracking_enabled}")
+        
+        # --- Tracking Rendering State ---
+        self.render_tracking_enabled = False  # Default: rendering OFF (no track lines/IDs shown)
+        self.render_tracking_lock = threading.Lock()
+        logger.info(f"Initial tracking render state: render_tracking_enabled={self.render_tracking_enabled}")
+        # ----------------------
+
         # --- Mode Configuration ---
         self.single_image_mode = not bool(self.rtsp_stream_url_config)
         if self.single_image_mode:
@@ -446,7 +457,8 @@ class DetectionSystem:
             results_update_callback=self.update_detection_results,
             max_track_points=self.max_track_points,
             model_names=model_names,
-            tracker_config_path=CUSTOM_TRACKER_CONFIG
+            tracker_config_path=CUSTOM_TRACKER_CONFIG,
+            tracking_enabled=self.tracking_enabled  # Pass the tracking state
         )
         logger.info("Initializing AnnotationWorker...")
         self.annotation_worker = AnnotationWorker(
@@ -455,7 +467,8 @@ class DetectionSystem:
             annotated_frame_callback=self.update_latest_annotated_frame,
             max_track_points=self.max_track_points,
             model_names=model_names,
-            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled
+            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled,
+            is_render_tracking_enabled_func=self.is_render_tracking_enabled  # Pass the render tracking callback
         )
         logger.info("Worker instances created.")
 
@@ -601,6 +614,69 @@ class DetectionSystem:
         """Check if tracking and bounding box drawing is enabled."""
         return getattr(self, 'draw_tracking_and_bounding_boxes', True)
 
+    # --- Tracking Control ---
+    def enable_tracking(self):
+        """Enable YOLO object tracking."""
+        with self.tracking_lock:
+            self.tracking_enabled = True
+            logger.info("YOLO tracking ENABLED.")
+            # Update the object detector if it exists
+            if self.object_detector:
+                self.object_detector.set_tracking_enabled(True)
+
+    def disable_tracking(self):
+        """Disable YOLO object tracking."""
+        with self.tracking_lock:
+            self.tracking_enabled = False
+            logger.info("YOLO tracking DISABLED.")
+            # Update the object detector if it exists
+            if self.object_detector:
+                self.object_detector.set_tracking_enabled(False)
+
+    def toggle_tracking(self):
+        """Toggle YOLO object tracking on/off."""
+        with self.tracking_lock:
+            self.tracking_enabled = not self.tracking_enabled
+            status = "ENABLED" if self.tracking_enabled else "DISABLED"
+            logger.info(f"YOLO tracking toggled: {status}.")
+            # Update the object detector if it exists
+            if self.object_detector:
+                self.object_detector.set_tracking_enabled(self.tracking_enabled)
+            return self.tracking_enabled
+
+    def is_tracking_enabled(self):
+        """Check if YOLO object tracking is enabled."""
+        with self.tracking_lock:
+            return self.tracking_enabled
+    # -------------------------
+
+    # --- Tracking Rendering Control ---
+    def enable_render_tracking(self):
+        """Enable rendering of tracking visualizations (track lines, IDs)."""
+        with self.render_tracking_lock:
+            self.render_tracking_enabled = True
+            logger.info("Tracking rendering ENABLED.")
+
+    def disable_render_tracking(self):
+        """Disable rendering of tracking visualizations (track lines, IDs)."""
+        with self.render_tracking_lock:
+            self.render_tracking_enabled = False
+            logger.info("Tracking rendering DISABLED.")
+
+    def toggle_render_tracking(self):
+        """Toggle rendering of tracking visualizations on/off."""
+        with self.render_tracking_lock:
+            self.render_tracking_enabled = not self.render_tracking_enabled
+            status = "ENABLED" if self.render_tracking_enabled else "DISABLED"
+            logger.info(f"Tracking rendering toggled: {status}.")
+            return self.render_tracking_enabled
+
+    def is_render_tracking_enabled(self):
+        """Check if tracking rendering is enabled."""
+        with self.render_tracking_lock:
+            return self.render_tracking_enabled
+    # -------------------------------------
+
     # --- Backend Annotation Control ---
     def enable_backend_annotation(self):
         with self.backend_annotation_lock:
@@ -660,20 +736,33 @@ class DetectionSystem:
             else:
                 device = 'cpu'
                 
-            # Run detection with tracking (even for single images, to get consistent results)
-            track_args = {
-                "source": cv_image,
-                "persist": False,  # Don't persist tracking for single images
-                "verbose": False,
-                "conf": min_confidence,  # Use the provided confidence threshold
-                "device": device
-            }
+            # Run detection - use tracking or predict based on tracking_enabled flag
+            with self.tracking_lock:
+                use_tracking = self.tracking_enabled
             
-            # Use custom tracker config if available
-            if hasattr(self, 'model') and CUSTOM_TRACKER_CONFIG:
-                track_args["tracker"] = CUSTOM_TRACKER_CONFIG
+            if use_tracking:
+                # Run detection with tracking
+                track_args = {
+                    "source": cv_image,
+                    "persist": False,  # Don't persist tracking for single images
+                    "verbose": False,
+                    "conf": min_confidence,  # Use the provided confidence threshold
+                    "device": device
+                }
                 
-            results = self.model.track(**track_args)
+                # Use custom tracker config if available
+                if hasattr(self, 'model') and CUSTOM_TRACKER_CONFIG:
+                    track_args["tracker"] = CUSTOM_TRACKER_CONFIG
+                    
+                results = self.model.track(**track_args)
+            else:
+                # Run detection without tracking
+                results = self.model.predict(
+                    source=cv_image,
+                    verbose=False,
+                    conf=min_confidence,
+                    device=device
+                )
             
             detections = []
             
@@ -777,7 +866,8 @@ class DetectionSystem:
             results_update_callback=self.update_detection_results,
             max_track_points=self.max_track_points,
             model_names=model_names,
-            tracker_config_path=CUSTOM_TRACKER_CONFIG
+            tracker_config_path=CUSTOM_TRACKER_CONFIG,
+            tracking_enabled=self.tracking_enabled  # Pass the tracking state
         )
         logger.info("Initializing AnnotationWorker...")
         self.annotation_worker = AnnotationWorker(
@@ -786,7 +876,8 @@ class DetectionSystem:
             annotated_frame_callback=self.update_latest_annotated_frame,
             max_track_points=self.max_track_points,
             model_names=model_names,
-            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled
+            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled,
+            is_render_tracking_enabled_func=self.is_render_tracking_enabled  # Pass the render tracking callback
         )
         logger.info("Worker instances created.")
 

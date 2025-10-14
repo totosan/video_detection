@@ -7,13 +7,14 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 class AnnotationWorker:
-    def __init__(self, annotation_queue, stop_event, annotated_frame_callback, max_track_points, model_names, is_backend_annotation_enabled_func):
+    def __init__(self, annotation_queue, stop_event, annotated_frame_callback, max_track_points, model_names, is_backend_annotation_enabled_func, is_render_tracking_enabled_func):
         self.annotation_queue = annotation_queue
         self.stop_event = stop_event
         self.annotated_frame_callback = annotated_frame_callback
         self.max_track_points = max_track_points
         self.model_names = model_names
         self.is_backend_annotation_enabled_func = is_backend_annotation_enabled_func
+        self.is_render_tracking_enabled_func = is_render_tracking_enabled_func  # New callback
         self.thread = None
 
     def start(self):
@@ -38,14 +39,19 @@ class AnnotationWorker:
                 continue
             try:
                 annotated = frame.copy()
-                # Draw track lines
-                # Iterate over a copy of the dictionary to prevent runtime errors
-                for track_id, points in list(track_history.items()):
-                    if len(points) > 1:
-                        color = ((track_id * 50) % 255, (track_id * 80) % 255, (track_id * 120) % 255)
-                        pts = [(int(x), int(y)) for x, y in points]
-                        for i in range(1, len(pts)):
-                            cv2.line(annotated, pts[i-1], pts[i], color, 2)
+                
+                # Check if we should render tracking visualizations
+                render_tracking = self.is_render_tracking_enabled_func()
+                
+                # Draw track lines only if rendering is enabled
+                if render_tracking:
+                    # Iterate over a copy of the dictionary to prevent runtime errors
+                    for track_id, points in list(track_history.items()):
+                        if len(points) > 1:
+                            color = ((track_id * 50) % 255, (track_id * 80) % 255, (track_id * 120) % 255)
+                            pts = [(int(x), int(y)) for x, y in points]
+                            for i in range(1, len(pts)):
+                                cv2.line(annotated, pts[i-1], pts[i], color, 3)
                 
                 # First pass: Draw segmentation masks
                 for det in current_detections:
@@ -115,27 +121,29 @@ class AnnotationWorker:
                                     
                                     # Add outline around the mask
                                     contours, _ = cv2.findContours(
-                                        binary_mask, 
-                                        cv2.RETR_EXTERNAL, 
+                                        binary_mask,
+                                        cv2.RETR_EXTERNAL,
                                         cv2.CHAIN_APPROX_SIMPLE
                                     )
-                                    cv2.drawContours(annotated, contours, -1, color, 2)
+                                    cv2.drawContours(annotated, contours, -1, color, 3)
                                     
                                     logger.debug(f"Drew segmentation mask for track ID {track_id}")
                                 except Exception as e:
                                     logger.warning(f"Error drawing segmentation mask: {e}")
                                     # Fall back to bounding box
-                                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
                             else:
                                 # Fall back to bounding box if mask is not found
-                                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
                         else:
                             # Draw bounding box if no mask
-                            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+                            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
                     except Exception as e:
                         logger.exception(f"Error processing mask: {e}")
                 
-                text_size = 2.5 # Adjusted for better fit
+                # Adjusted text size to match JavaScript version more closely
+                text_size = 1.8
+                text_thickness = 2
                 # Second pass: Draw labels
                 for det in current_detections:
                     try:
@@ -152,12 +160,22 @@ class AnnotationWorker:
                         
                         label_text = f"{label} (ID: {track_id})" if track_id is not None else label
 
-                        # --- Text Placement Logic ---
-                        text_x, text_y = 0, 0
-                        text_origin_set = False
+                        # --- Text Placement Logic: Top-left of bounding box (like JavaScript) ---
+                        (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, text_size, text_thickness)
+                        
+                        # Position at top-left of bounding box, above the box
+                        text_x = x1
+                        text_y = y1 - 4  # 4 pixels above the box
+                        
+                        # If text would go off the top, place it below the top edge
+                        if text_y - text_h < 0:
+                            text_y = y1 + text_h + 4
 
-                        # Try to find center of segmentation mask first
-                        if det.get('has_mask') and track_id is not None and track_id in tracked_objects_info and 'segmentation_mask' in tracked_objects_info[track_id]:
+                        # Old centered placement logic removed - we now use top-left positioning
+                        text_origin_set = False  # Not needed anymore but keeping variable for compatibility
+
+                        # Try to find center of segmentation mask first (REMOVED - no longer needed)
+                        if False and det.get('has_mask') and track_id is not None and track_id in tracked_objects_info and 'segmentation_mask' in tracked_objects_info[track_id]:
                             try:
                                 mask = tracked_objects_info[track_id]['segmentation_mask']
                                 h, w = frame.shape[:2]
@@ -184,35 +202,32 @@ class AnnotationWorker:
                             except Exception as e:
                                 logger.warning(f"Could not calculate mask centroid for track {track_id}: {e}")
 
-                        # Fallback to bounding box center if mask center fails or is not available
-                        if not text_origin_set:
-                            text_x = (x1 + x2) // 2
-                            text_y = (y1 + y2) // 2
+                        # Text is positioned at top-left of bounding box (already calculated above)
+                        # No fallback needed - we don't use centered positioning anymore
                         
-                        # --- Draw Text with Background ---
-                        (text_w, text_h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, text_size, 1)
-                        
-                        # Center the text block on the calculated origin (text_x, text_y)
-                        rect_x1 = text_x - text_w // 2
-                        rect_y1 = text_y - text_h // 2
-                        rect_x2 = text_x + text_w // 2
-                        rect_y2 = text_y + text_h // 2
+                        # --- Draw Text with Background (compact style like JavaScript) ---
+                        # Background rectangle
+                        rect_x1 = text_x
+                        rect_y1 = text_y - text_h - 2
+                        rect_x2 = text_x + text_w + 4
+                        rect_y2 = text_y + 2
 
                         cv2.rectangle(
                             annotated,
-                            (rect_x1 - 2, rect_y1 - 2),
-                            (rect_x2 + 2, rect_y2 + 4),
-                            (0, 0, 0),  # black background
+                            (rect_x1, rect_y1),
+                            (rect_x2, rect_y2),
+                            color,  # Use detection color for background (matches JavaScript)
                             -1
                         )
                         cv2.putText(
                             annotated,
                             label_text,
-                            (rect_x1, rect_y2),
+                            (text_x + 2, text_y),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             text_size,
                             (255, 255, 255),  # white text
-                            1
+                            text_thickness,
+                            cv2.LINE_AA
                         )
 
                     except Exception as e:
