@@ -23,15 +23,21 @@ public class Program
 {
     public static async Task Main(string[] args)
     {
+        // Clear the console for a fresh start
+        Console.Clear();
+        
         // Load environment variables from .env file
         DotNetEnv.Env.Load("/Users/toto/Projects/JetsonNano/ai-video-solution/Frontend/.env");
 
         // Stylish console banner
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("*********************************************");
-        Console.WriteLine("*   🤖 AI Vision Assistant Console   *");
-        Console.WriteLine("*********************************************");
+        Console.WriteLine("╔═══════════════════════════════════════════════════╗");
+        Console.WriteLine("║                                                   ║");
+        Console.WriteLine("║       🤖  AI Vision Assistant Console  🎥        ║");
+        Console.WriteLine("║                                                   ║");
+        Console.WriteLine("╚═══════════════════════════════════════════════════╝");
         Console.ResetColor();
+        Console.WriteLine();
 
         // Determine if running in online mode (using OpenAI) or Hugging Face
         bool useOpenAI = args.Contains("-online");
@@ -120,7 +126,7 @@ public class Program
         var settingsTxt = new OllamaPromptExecutionSettings { 
             FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(autoInvoke: true),
             ServiceId = "ollamaTxt",
-            Temperature = 0.1f  // Lower temperature for more focused responses
+            Temperature = 0.3f  // Increased from 0.1 for better reasoning flexibility
         };
         var settingsVis = new OllamaPromptExecutionSettings { 
             FunctionChoiceBehavior = FunctionChoiceBehavior.None(), 
@@ -129,8 +135,8 @@ public class Program
         var settingsOpenAI = new OpenAIPromptExecutionSettings { 
             FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(autoInvoke: true),
             ServiceId = "openAI",
-            Temperature = 0.1f,
-            MaxTokens = 500     // Limit response length to conserve context
+            Temperature = 0.3f,  // Increased from 0.1 for better reasoning
+            MaxTokens = 1500     // Increased from 500 for more complete responses
         };
         var settingsHuggingFace = new HuggingFacePromptExecutionSettings { 
             ServiceId = "huggingFace"
@@ -161,7 +167,9 @@ public class Program
 
         if (useOpenAI && chatCompletionServiceOpenAI != null) // Check if OpenAI service was successfully retrieved
         {
-            Console.WriteLine("Using OpenAI API with function calling.");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✓ Using OpenAI API with function calling.");
+            Console.ResetColor();
             activeChatService = chatCompletionServiceOpenAI;
             activeSettings = settingsOpenAI;
             kernel.Plugins.Add(pluginsObjectDetection); // Add plugins to the main kernel for OpenAI
@@ -169,8 +177,12 @@ public class Program
         }
         else if (useHuggingFace && chatCompletionServiceHuggingFace != null) // Check if Hugging Face service was successfully retrieved
         {
-            Console.WriteLine("Using Hugging Face API.");
-            Console.WriteLine("Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✓ Using Hugging Face API.");
+            Console.ResetColor();
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✓ Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            Console.ResetColor();
             activeChatService = chatCompletionServiceOllamaTxt; // Default to Ollama text
             activeSettings = settingsTxt;
             var kernelTxt = kernel.Clone(); // Clone the kernel for Ollama-specific plugins
@@ -179,7 +191,9 @@ public class Program
         }
         else
         {
-            Console.WriteLine("Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✓ Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            Console.ResetColor();
             activeChatService = chatCompletionServiceOllamaTxt; // Default to Ollama text
             activeSettings = settingsTxt;
             var kernelTxt = kernel.Clone(); // Clone the kernel for Ollama-specific plugins
@@ -187,38 +201,58 @@ public class Program
             activeKernel = kernelTxt; 
         }
 
-
-        Console.WriteLine($"Chat with {(useOpenAI && chatCompletionServiceOpenAI != null ? "OpenAI" : (useHuggingFace && chatCompletionServiceHuggingFace != null ? "Hugging Face" : "Ollama"))} model (type 'exit' to quit):");
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Magenta;
+        Console.WriteLine("═══════════════════════════════════════════════════");
+        Console.WriteLine($"  Chat Session Started - Type 'exit' to quit");
+        Console.WriteLine("═══════════════════════════════════════════════════");
+        Console.ResetColor();
+        Console.WriteLine();
         
         // Add function invocation logging
         activeKernel.FunctionInvocationFilters.Add(new FunctionInvocationLoggingFilter());
         
         var chatHistory = new ChatHistory("""
-        Vision assistant. Track IDs are shown in the video image as labels like "person (ID: 1)".
+        You are a Vision Assistant for a VIDEO OBJECT DETECTION SYSTEM.
+
+        CRITICAL CONTEXT:
+        - You work with OBJECT DETECTION data (people, chairs, cups, bottles, etc.)
+        - Each detected object has a TRACK_ID (an integer like 2, 3, 5, 31)
+        - You help users identify and track specific objects in video frames
+        - THIS IS NOT MUSIC DATA - ignore any audio/music interpretations
+
+        WHEN USER ASKS "what ids are there?" or "list objects":
+        1. Call GetCurrentDetectionsAsync()
+        2. The response contains object detection data with:
+           - "label": type of object (person, chair, cup, etc.)
+           - "track_id": unique integer ID for tracking
+           - "box": bounding box coordinates
+        3. Parse the "objects" field and list each item clearly
+        4. Example response: "I see: person (ID: 2), person (ID: 5), chair (ID: 3), cup (ID: 7)"
 
         TRACKING WORKFLOW:
-        1. User asks to follow/track an object
-        2. Call GetTheImage() - you'll see labels with IDs in the image
-        3. Read the ID from the visual label (e.g., "chair (ID: 3)" means ID is 3)
-        4. Call SetTrackIdFilterAsync(ID) with that exact integer ID
-        5. Confirm tracking
+        1. User asks to track an object
+        2. Call GetTheImage() to see the video frame
+        3. Identify the object's ID from visual label
+        4. Call SetTrackIdFilterAsync(ID) with the integer ID
+        5. Confirm tracking is active
 
-        LISTING:
-        "list objects" → GetCurrentDetectionsAsync() → report what you see
-
-        IMPORTANT: 
-        - IDs are visible IN THE IMAGE as text overlays
-        - Extract the ID number from what you see visually
-        - If multiple objects of same type, let user choose or pick based on position they specify
-        
-        Keep responses brief.
+        GOLDEN RULES:
+        - NEVER interpret detection data as music/audio data
+        - ALWAYS parse JSON responses correctly
+        - track_id = object tracking ID (NOT music metadata)
+        - label = object type (NOT record label)
+        - box = bounding box coordinates (NOT audio frames)
+        - Stay focused on OBJECT DETECTION domain
         """);
 
-        const int MAX_HISTORY_MESSAGES = 3; // Keep system message + last 10 exchanges
+        const int MAX_HISTORY_MESSAGES = 10; // Keep system message + last 10 exchanges (increased from 3)
         
         while (true)
         {
-            Console.Write("User: ");
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.Write("You ▶ ");
+            Console.ResetColor();
             var userInput = Console.ReadLine();
 
             if (string.IsNullOrWhiteSpace(userInput))
@@ -228,7 +262,13 @@ public class Program
 
             if (userInput.Equals("exit", StringComparison.OrdinalIgnoreCase))
             {
-                Console.WriteLine("Exiting chat.");
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("╔═══════════════════════════════════════════════════╗");
+                Console.WriteLine("║          👋  Thank you for using the AI           ║");
+                Console.WriteLine("║              Vision Assistant Console             ║");
+                Console.WriteLine("╚═══════════════════════════════════════════════════╝");
+                Console.ResetColor();
                 break;
             }
 
@@ -245,7 +285,9 @@ public class Program
                     {
                         chatHistory.RemoveAt(1); // Always remove at index 1 (after system message)
                     }
-                    Console.WriteLine($"[Context trimmed: Keeping last {MAX_HISTORY_MESSAGES} messages]");
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    Console.WriteLine($"   [Context trimmed: Keeping last {MAX_HISTORY_MESSAGES} messages]");
+                    Console.ResetColor();
                 }
 
                 // Use GetChatMessageContentsAsync to enable automatic function calling loop
@@ -260,13 +302,35 @@ public class Program
                 var finalResult = results.LastOrDefault();
                 var assistantResponse = finalResult?.Content ?? "No response generated.";
 
-                Console.WriteLine($"Assistant: {assistantResponse}");
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.Write("AI 🤖 ");
+                Console.ResetColor();
+                Console.WriteLine(assistantResponse);
+                
+                // Add visual separator after each conversation
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine("───────────────────────────────────────────────────");
+                Console.ResetColor();
+                Console.WriteLine();
+                
                 chatHistory.AddAssistantMessage(assistantResponse);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"❌ Error: {ex.Message}");
+                Console.ForegroundColor = ConsoleColor.DarkRed;
+                Console.WriteLine($"   Stack trace: {ex.StackTrace}");
+                Console.ResetColor();
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine("───────────────────────────────────────────────────");
+                Console.ResetColor();
+                Console.WriteLine();
+                
                 // Optionally, remove the last user message if the API call failed to allow retry or different input
                 if (chatHistory.Count > 0)
                 {
@@ -440,13 +504,15 @@ public class FunctionInvocationLoggingFilter : IFunctionInvocationFilter
 {
     public async Task OnFunctionInvocationAsync(FunctionInvocationContext context, Func<FunctionInvocationContext, Task> next)
     {
+        Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine($"🔧 Calling tool: {context.Function.Name}");
+        Console.WriteLine($"   🔧 Calling tool: {context.Function.Name}");
         
         // Log parameters if any
         if (context.Arguments.Count > 0)
         {
-            Console.WriteLine($"   Parameters: {string.Join(", ", context.Arguments.Select(kvp => $"{kvp.Key}={kvp.Value}"))}");
+            Console.ForegroundColor = ConsoleColor.DarkYellow;
+            Console.WriteLine($"      Parameters: {string.Join(", ", context.Arguments.Select(kvp => $"{kvp.Key}={kvp.Value}"))}");
         }
         
         Console.ResetColor();
@@ -454,8 +520,9 @@ public class FunctionInvocationLoggingFilter : IFunctionInvocationFilter
         await next(context);
         
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"✅ Tool {context.Function.Name} completed");
+        Console.WriteLine($"   ✅ Tool {context.Function.Name} completed");
         Console.ResetColor();
+        Console.WriteLine();
     }
 }
 

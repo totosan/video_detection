@@ -73,7 +73,7 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"Requests the current objects, that one can see in a scene. Returns JSON: {""detections"": [...]} or {""error"": ""...""}. This always returns ALL objects in the scene, regardless of any active tracking filters, so you can help users select objects to track.")]
+        [KernelFunction, Description(@"Gets all detected objects currently visible in the video frame. Returns a list of objects with their labels (e.g., 'person', 'chair', 'cup') and track IDs (integers). Each detection has: label (object type), track_id (unique integer ID), box (coordinates), and color. Use this to answer questions like 'what objects are there?' or 'what IDs exist?'. Always parse and summarize the results for the user - list each object type and its track_id clearly.")]
         public async Task<string> GetCurrentDetectionsAsync()
         {
             // Use the unfiltered endpoint so we can see ALL objects even when a track ID filter is active
@@ -81,6 +81,25 @@ namespace Frontend
             try
             {
                 var result = await GetApiResponseAsync(url); // app.py returns {"detections": [...]} or {"error": "..."}
+                
+                // Parse and format for better LLM understanding
+                var jsonDoc = JsonDocument.Parse(result);
+                if (jsonDoc.RootElement.TryGetProperty("detections", out JsonElement detectionsElement))
+                {
+                    var detections = new List<string>();
+                    foreach (var detection in detectionsElement.EnumerateArray())
+                    {
+                        var label = detection.GetProperty("label").GetString();
+                        var trackId = detection.GetProperty("track_id").GetInt32();
+                        detections.Add($"{label} (ID: {trackId})");
+                    }
+                    
+                    return JsonSerializer.Serialize(new { 
+                        summary = $"Found {detections.Count} objects",
+                        objects = detections,
+                        raw_data = result 
+                    });
+                }
                 return result;
             }
             catch (HttpRequestException e)
