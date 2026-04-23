@@ -1,0 +1,94 @@
+# Optimized Docker image for Intel x86_64 with CPU optimizations
+FROM python:3.11-slim-bookworm AS base
+
+# Set environment variables for performance
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    OPENBLAS_NUM_THREADS=4 \
+    NUMEXPR_MAX_THREADS=4
+
+# Install system dependencies including Intel optimizations
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    libgstreamer1.0-0 \
+    gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav \
+    libgstreamer-plugins-base1.0-0 \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    libv4l-dev \
+    pkg-config \
+    wget \
+    curl \
+    libopenblas-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libtiff-dev \
+    libwebp-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create app user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Set working directory
+WORKDIR /video_detection
+
+# Copy requirements first for better caching
+COPY requirements.txt pyproject.toml ./
+
+# Install Python dependencies with Intel optimizations
+RUN python -m pip install --upgrade pip && \
+    # Install NumPy with OpenBLAS support
+    pip install --no-cache-dir numpy==1.23.5 && \
+    # Install OpenCV optimized for CPU
+    pip install --no-cache-dir opencv-python-headless && \
+    # Install other requirements
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir pyzmq && \
+    # Install PyTorch CPU version for better performance
+    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# Copy application code
+COPY --chown=appuser:appuser . .
+
+# Create necessary directories
+RUN mkdir -p /video_detection/static /video_detection/Snapshots && \
+    chown -R appuser:appuser /video_detection
+
+# Download YOLO model if not present
+RUN if [ ! -f "yolo11n-seg.pt" ]; then \
+    wget -O yolo11n-seg.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt; \
+    fi && \
+    chown appuser:appuser yolo11n-seg.pt
+
+# Switch to non-root user
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8082/api/status || exit 1
+
+# Expose ports
+EXPOSE 8082 5555 5556
+
+# Set default environment variables
+ENV FLASK_RUN_HOST=0.0.0.0 \
+    FLASK_RUN_PORT=8082 \
+    DETECTION_IMAGE_ENDPOINT="tcp://*:5555" \
+    DETECTION_RESULTS_ENDPOINT="tcp://*:5556"
+
+# Run the application
+ENTRYPOINT ["python", "app.py"]

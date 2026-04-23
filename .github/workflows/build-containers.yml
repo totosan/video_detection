@@ -1,0 +1,211 @@
+name: Build and Publish Container Images
+
+on:
+  push:
+    branches:
+      - main
+      - segmentation_containerimages
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/video-detection
+
+jobs:
+  build-intel-standard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,suffix=-intel
+            type=ref,event=pr,suffix=-intel
+            type=semver,pattern={{version}},suffix=-intel
+            type=raw,value=intel-latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./video_detection
+          file: ./video_detection/Docker/Dockerfile.intel
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-intel-optimized:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,suffix=-intel-optimized
+            type=ref,event=pr,suffix=-intel-optimized
+            type=semver,pattern={{version}},suffix=-intel-optimized
+            type=raw,value=intel-optimized-latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./video_detection
+          file: ./video_detection/Docker/Dockerfile.intel-optimized
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-jetson-nano:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch,suffix=-jetson-nano
+            type=ref,event=pr,suffix=-jetson-nano
+            type=semver,pattern={{version}},suffix=-jetson-nano
+            type=raw,value=jetson-nano-latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./video_detection
+          file: ./video_detection/Docker/Dockerfile.jetson-ci
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+  create-multi-arch-manifest:
+    runs-on: ubuntu-latest
+    needs: [build-intel-standard, build-intel-optimized, build-jetson-nano]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        run: |
+          # Create manifest for latest multi-arch image
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            # Create multi-arch latest tag
+            docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:intel-latest \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:jetson-nano-latest
+            
+            docker manifest annotate ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:intel-latest \
+              --arch amd64 --os linux
+            
+            docker manifest annotate ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:jetson-nano-latest \
+              --arch arm64 --os linux
+            
+            docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          fi
+          
+          # For tags, create version-specific multi-arch manifest
+          if [[ "${{ github.ref }}" =~ ^refs/tags/v.*$ ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+            
+            docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION} \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}-intel \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}-jetson-nano
+            
+            docker manifest annotate ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION} \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}-intel \
+              --arch amd64 --os linux
+            
+            docker manifest annotate ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION} \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}-jetson-nano \
+              --arch arm64 --os linux
+            
+            docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}
+          fi

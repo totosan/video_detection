@@ -23,17 +23,30 @@ public class Program
 {
     public static async Task Main(string[] args)
     {
+        // Clear the console for a fresh start
+        Console.Clear();
+        
         // Load environment variables from .env file
         DotNetEnv.Env.Load("/Users/toto/Projects/JetsonNano/ai-video-solution/Frontend/.env");
+
+        // Stylish console banner
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("╔═══════════════════════════════════════════════════╗");
+        Console.WriteLine("║                                                   ║");
+        Console.WriteLine("║       🤖  AI Vision Assistant Console  🎥        ║");
+        Console.WriteLine("║                                                   ║");
+        Console.WriteLine("╚═══════════════════════════════════════════════════╝");
+        Console.ResetColor();
+        Console.WriteLine();
 
         // Determine if running in online mode (using OpenAI) or Hugging Face
         bool useOpenAI = args.Contains("-online");
         bool useHuggingFace = args.Contains("-huggingface");
 
         // Configure these to your Ollama setup
-        //var ollamaMode_text_lId = "smollm2:latest"; // Or your preferred model, e.g., "mistral", "phi3"
+        //var ollamaMode_text_lId = "gpt-oss:20b"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaMode_text_lId = "llama3.2"; // Or your preferred model, e.g., "mistral", "phi3"
-        var ollamaMode_vision_lId = "moondream:latest"; // Or your preferred model, e.g., "mistral", "phi3"
+        var ollamaMode_vision_lId = "minicpm-v:8b"; // Changed from :latest to :8b (the actual installed version)
         //var ollamaMode_vision_lId = "llava-phi3:latest"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaBaseUrl = new Uri("http://localhost:11434"); // Default Ollama API endpoint
 
@@ -110,10 +123,24 @@ public class Program
         //var kernelTxt = kernel.Clone(); // Cloning will be conditional or handled differently
         //var kernelVis = kernel.Clone();
 
-        var settingsTxt = new OllamaPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(), ServiceId = "ollamaTxt" };
-        var settingsVis = new OllamaPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.None(), ServiceId = "ollamaVis" };
-        var settingsOpenAI = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(), ServiceId = "openAI" };
-        var settingsHuggingFace = new HuggingFacePromptExecutionSettings { ServiceId = "huggingFace" }; // FunctionChoiceBehavior not available
+        var settingsTxt = new OllamaPromptExecutionSettings { 
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(autoInvoke: true),
+            ServiceId = "ollamaTxt",
+            Temperature = 0.3f  // Increased from 0.1 for better reasoning flexibility
+        };
+        var settingsVis = new OllamaPromptExecutionSettings { 
+            FunctionChoiceBehavior = FunctionChoiceBehavior.None(), 
+            ServiceId = "ollamaVis"
+        };
+        var settingsOpenAI = new OpenAIPromptExecutionSettings { 
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(autoInvoke: true),
+            ServiceId = "openAI",
+            Temperature = 0.3f,  // Increased from 0.1 for better reasoning
+            MaxTokens = 1500     // Increased from 500 for more complete responses
+        };
+        var settingsHuggingFace = new HuggingFacePromptExecutionSettings { 
+            ServiceId = "huggingFace"
+        }; // FunctionChoiceBehavior not available
 
         // Retrieve the chat completion service
         var chatCompletionServiceOllamaTxt = kernel.Services.GetRequiredKeyedService<IChatCompletionService>("ollamaTxt");
@@ -140,7 +167,9 @@ public class Program
 
         if (useOpenAI && chatCompletionServiceOpenAI != null) // Check if OpenAI service was successfully retrieved
         {
-            Console.WriteLine("Using OpenAI API with function calling.");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✓ Using OpenAI API with function calling.");
+            Console.ResetColor();
             activeChatService = chatCompletionServiceOpenAI;
             activeSettings = settingsOpenAI;
             kernel.Plugins.Add(pluginsObjectDetection); // Add plugins to the main kernel for OpenAI
@@ -148,8 +177,12 @@ public class Program
         }
         else if (useHuggingFace && chatCompletionServiceHuggingFace != null) // Check if Hugging Face service was successfully retrieved
         {
-            Console.WriteLine("Using Hugging Face API.");
-            Console.WriteLine("Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✓ Using Hugging Face API.");
+            Console.ResetColor();
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✓ Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            Console.ResetColor();
             activeChatService = chatCompletionServiceOllamaTxt; // Default to Ollama text
             activeSettings = settingsTxt;
             var kernelTxt = kernel.Clone(); // Clone the kernel for Ollama-specific plugins
@@ -158,7 +191,9 @@ public class Program
         }
         else
         {
-            Console.WriteLine("Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("✓ Using Ollama API (either no specific service requested, API key missing, or service retrieval failed) with function calling.");
+            Console.ResetColor();
             activeChatService = chatCompletionServiceOllamaTxt; // Default to Ollama text
             activeSettings = settingsTxt;
             var kernelTxt = kernel.Clone(); // Clone the kernel for Ollama-specific plugins
@@ -166,23 +201,58 @@ public class Program
             activeKernel = kernelTxt; 
         }
 
-
-        Console.WriteLine($"Chat with {(useOpenAI && chatCompletionServiceOpenAI != null ? "OpenAI" : (useHuggingFace && chatCompletionServiceHuggingFace != null ? "Hugging Face" : "Ollama"))} model (type 'exit' to quit):");
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Magenta;
+        Console.WriteLine("═══════════════════════════════════════════════════");
+        Console.WriteLine($"  Chat Session Started - Type 'exit' to quit");
+        Console.WriteLine("═══════════════════════════════════════════════════");
+        Console.ResetColor();
+        Console.WriteLine();
+        
+        // Add function invocation logging
+        activeKernel.FunctionInvocationFilters.Add(new FunctionInvocationLoggingFilter());
+        
         var chatHistory = new ChatHistory("""
-        You are an assistant that can help the user with video analysis.
-        You are able to detect objects in a video stream and provide a detailed description of the visual data. 
-        You are able to differentiate between specific object detection and general visual analysis.
-        You are able to get current detections of objects in a video stream, get the current systems state, and get snapshots of the video stream.
-        DON'T provide solutions; focus only on answering the question in a human way.
-        DON'T provide any code or technical details.
-        DON'T provide any explanations or extra text.
-        DO NOT ask for clarifications.
+        You are a Vision Assistant for a VIDEO OBJECT DETECTION SYSTEM.
 
+        CRITICAL CONTEXT:
+        - You work with OBJECT DETECTION data (people, chairs, cups, bottles, etc.)
+        - Each detected object has a TRACK_ID (an integer like 2, 3, 5, 31)
+        - You help users identify and track specific objects in video frames
+        - THIS IS NOT MUSIC DATA - ignore any audio/music interpretations
+
+        WHEN USER ASKS "what ids are there?" or "list objects":
+        1. Call GetCurrentDetectionsAsync()
+        2. The response contains object detection data with:
+           - "label": type of object (person, chair, cup, etc.)
+           - "track_id": unique integer ID for tracking
+           - "box": bounding box coordinates
+        3. Parse the "objects" field and list each item clearly
+        4. Example response: "I see: person (ID: 2), person (ID: 5), chair (ID: 3), cup (ID: 7)"
+
+        TRACKING WORKFLOW:
+        1. User asks to track an object
+        2. Call GetTheImage() to see the video frame
+        3. Identify the object's ID from visual label
+        4. Call SetTrackIdFilterAsync(ID) with the integer ID
+        5. Confirm tracking is active
+
+        GOLDEN RULES:
+        - NEVER interpret detection data as music/audio data
+        - ALWAYS parse JSON responses correctly
+        - track_id = object tracking ID (NOT music metadata)
+        - label = object type (NOT record label)
+        - box = bounding box coordinates (NOT audio frames)
+        - Stay focused on OBJECT DETECTION domain
         """);
 
+        const int MAX_HISTORY_MESSAGES = 10; // Keep system message + last 10 exchanges (increased from 3)
+        
         while (true)
         {
-            Console.Write("User: ");
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.Write("You ▶ ");
+            Console.ResetColor();
             var userInput = Console.ReadLine();
 
             if (string.IsNullOrWhiteSpace(userInput))
@@ -192,7 +262,13 @@ public class Program
 
             if (userInput.Equals("exit", StringComparison.OrdinalIgnoreCase))
             {
-                Console.WriteLine("Exiting chat.");
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("╔═══════════════════════════════════════════════════╗");
+                Console.WriteLine("║          👋  Thank you for using the AI           ║");
+                Console.WriteLine("║              Vision Assistant Console             ║");
+                Console.WriteLine("╚═══════════════════════════════════════════════════╝");
+                Console.ResetColor();
                 break;
             }
 
@@ -200,21 +276,66 @@ public class Program
 
             try
             {
-                var result = await activeChatService.GetChatMessageContentAsync(
+                // Trim chat history to prevent context overflow
+                // Keep system message (index 0) and last N messages
+                if (chatHistory.Count > MAX_HISTORY_MESSAGES + 1) // +1 for system message
+                {
+                    int messagesToRemove = chatHistory.Count - MAX_HISTORY_MESSAGES - 1;
+                    for (int i = 0; i < messagesToRemove; i++)
+                    {
+                        chatHistory.RemoveAt(1); // Always remove at index 1 (after system message)
+                    }
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    Console.WriteLine($"   [Context trimmed: Keeping last {MAX_HISTORY_MESSAGES} messages]");
+                    Console.ResetColor();
+                }
+
+                // Use GetChatMessageContentsAsync to enable automatic function calling loop
+                // This will keep calling functions until the LLM provides a final answer
+                var results = await activeChatService.GetChatMessageContentsAsync(
                     chatHistory,
                     activeSettings,
-                    kernel: activeKernel // Use the correctly configured kernel
+                    kernel: activeKernel
                 ).ConfigureAwait(false);
-                var assistantResponse = result.Content;
 
-                Console.WriteLine($"Assistant: {assistantResponse}");
-                chatHistory.AddAssistantMessage(assistantResponse ?? string.Empty);
+                // Get the final response (last message in the results)
+                var finalResult = results.LastOrDefault();
+                var assistantResponse = finalResult?.Content ?? "No response generated.";
+
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.Write("AI 🤖 ");
+                Console.ResetColor();
+                Console.WriteLine(assistantResponse);
+                
+                // Add visual separator after each conversation
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine("───────────────────────────────────────────────────");
+                Console.ResetColor();
+                Console.WriteLine();
+                
+                chatHistory.AddAssistantMessage(assistantResponse);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"❌ Error: {ex.Message}");
+                Console.ForegroundColor = ConsoleColor.DarkRed;
+                Console.WriteLine($"   Stack trace: {ex.StackTrace}");
+                Console.ResetColor();
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine("───────────────────────────────────────────────────");
+                Console.ResetColor();
+                Console.WriteLine();
+                
                 // Optionally, remove the last user message if the API call failed to allow retry or different input
-                chatHistory.RemoveAt(chatHistory.Count - 1);
+                if (chatHistory.Count > 0)
+                {
+                    chatHistory.RemoveAt(chatHistory.Count - 1);
+                }
             }
         }
     }
@@ -376,6 +497,33 @@ public class Program
             Kernel = kernel,
             LoggerFactory = loggerFactory
         };
+}
+
+// Function invocation logging filter to track tool calls
+public class FunctionInvocationLoggingFilter : IFunctionInvocationFilter
+{
+    public async Task OnFunctionInvocationAsync(FunctionInvocationContext context, Func<FunctionInvocationContext, Task> next)
+    {
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine($"   🔧 Calling tool: {context.Function.Name}");
+        
+        // Log parameters if any
+        if (context.Arguments.Count > 0)
+        {
+            Console.ForegroundColor = ConsoleColor.DarkYellow;
+            Console.WriteLine($"      Parameters: {string.Join(", ", context.Arguments.Select(kvp => $"{kvp.Key}={kvp.Value}"))}");
+        }
+        
+        Console.ResetColor();
+        
+        await next(context);
+        
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"   ✅ Tool {context.Function.Name} completed");
+        Console.ResetColor();
+        Console.WriteLine();
+    }
 }
 
 #pragma warning restore SKEXP0070

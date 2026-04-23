@@ -31,6 +31,23 @@ class DetectionSystem:
         self.yolo_model_path_config = YOLO_MODEL_PATH
         self.max_track_points = MAX_TRACK_POINTS
 
+        # --- Filter State ---
+        self._active_track_id_filter = None
+        self._active_label_filter = []
+        logger.info(f"Initial filter state: track_id={self._active_track_id_filter}, labels={self._active_label_filter}")
+        # --------------------
+
+        # --- Tracking State ---
+        self.tracking_enabled = True  # Default: tracking ON (but rendering OFF by default)
+        self.tracking_lock = threading.Lock()
+        logger.info(f"Initial tracking state: tracking_enabled={self.tracking_enabled}")
+        
+        # --- Tracking Rendering State ---
+        self.render_tracking_enabled = False  # Default: rendering OFF (no track lines/IDs shown)
+        self.render_tracking_lock = threading.Lock()
+        logger.info(f"Initial tracking render state: render_tracking_enabled={self.render_tracking_enabled}")
+        # ----------------------
+
         # --- Mode Configuration ---
         self.single_image_mode = not bool(self.rtsp_stream_url_config)
         if self.single_image_mode:
@@ -87,6 +104,10 @@ class DetectionSystem:
         try:
             self.model = YOLO(model_path_to_load)  # Load the determined YOLO model
             logger.info(f"Loaded YOLO model from {model_path_to_load}")
+            
+            # Check if this is a segmentation model
+            if "-seg" in model_path_to_load:
+                logger.info("Detected segmentation model! Object segmentation masks will be used.")
         except Exception as e:
             logger.exception(f"Failed to load YOLO model from {model_path_to_load}. Cannot initialize DetectionSystem.")
             raise  # Re-raise the exception to prevent system from starting incorrectly
@@ -145,10 +166,21 @@ class DetectionSystem:
     def change_video_source(self, new_source_identifier):
         """Stops the current video stream, changes the source, and restarts."""
         logger.info(f"Attempting to change video source to: {new_source_identifier}")
+        
+        # Preserve current filter state before stopping
+        current_track_id_filter = self._active_track_id_filter
+        current_label_filter = self._active_label_filter.copy()
+        logger.info(f"Preserving filter state: track_id={current_track_id_filter}, labels={current_label_filter}")
+        
         try:
             # Stop existing workers
             self.stop() # This should wait for threads to join (with timeout)
             logger.info("Detection system stopped for source change.")
+
+            # Restore filter state after stop (since _clear_queues_and_reset_state resets them)
+            self._active_track_id_filter = current_track_id_filter
+            self._active_label_filter = current_label_filter
+            logger.info(f"Filter state restored: track_id={self._active_track_id_filter}, labels={self._active_label_filter}")
 
             # Update the source identifier and type
             self._set_source_from_config(new_source_identifier)
@@ -262,65 +294,34 @@ class DetectionSystem:
 
     def get_tracked_objects_info(self):
         with self.detections_data_lock:
-            return self.latest_detections_data["tracked_objects_info"].copy() # Make a deep copy to be safe
+            # Ensure a deep copy if tracked_objects_info contains mutable objects like lists or dicts
+            # For now, assuming .copy() is sufficient if values are simple or immutable
+            return self.latest_detections_data["tracked_objects_info"].copy()
 
     def get_track_history(self):
         with self.detections_data_lock:
-            return self.latest_detections_data["track_history"].copy()
+            # Convert deques to lists for external use if they are stored as deques
+            history_copy = {k: list(v) if isinstance(v, deque) else v 
+                            for k, v in self.latest_detections_data["track_history"].items()}
+            return history_copy
 
     # --- New Getter for Current Detections ---
     def get_current_detections_data(self):
-        """Returns the latest raw detection results, frame shape, and track history."""
+        """Returns the latest processed detection results and frame shape for the API."""
         with self.detections_data_lock:
-            detections = self.latest_detections_data.get("results", [])
-            shape = self.latest_detections_data.get("frame_shape")
-            track_history_deques = self.latest_detections_data.get("track_history", {})
-            tracked_objects_info = self.latest_detections_data.get("tracked_objects_info", {})
+            # 'results' from latest_detections_data is now the list of serializable dicts
+            # prepared by ObjectDetector._detect_objects AFTER filtering.
+            serializable_detections = self.latest_detections_data.get("results", [])
+            frame_shape_tuple = self.latest_detections_data.get("frame_shape") # Expected (height, width)
 
-            frame_width = None
-            frame_height = None
-            if shape is not None and isinstance(shape, (tuple, list)) and len(shape) >= 2:
-                frame_height = shape[0]
-                frame_width = shape[1]
-
-            # Convert deques to lists for JSON serialization
-            track_history_lists = {
-                str(track_id): list(points)
-                for track_id, points in track_history_deques.items()
+            # The API endpoint in app.py expects a dictionary with 'detections' and 'frame_shape'
+            # The 'detections' list should already contain 'mask_points' if available.
+            response_data = {
+                "detections": serializable_detections if serializable_detections is not None else [],
+                "frame_shape": list(frame_shape_tuple) if frame_shape_tuple else None # Convert tuple to list for JSON
             }
-
-            # Serialize YOLO Results as per UI expectation
-            serializable_detections = []
-            if detections and hasattr(detections, "__getitem__"):
-                for det in detections:
-                    if hasattr(det, "boxes") and det.boxes is not None:
-                        boxes = det.boxes
-                        xyxy = boxes.xyxy.cpu().numpy()
-                        confs = boxes.conf.cpu().numpy()
-                        clss = boxes.cls.cpu().numpy()
-                        track_ids = boxes.id.cpu().numpy() if hasattr(boxes, "id") and boxes.id is not None else [None]*len(xyxy)
-                        for i in range(len(xyxy)):
-                            box = [float(x) for x in xyxy[i]]
-                            conf = float(confs[i])
-                            cls_idx = int(clss[i])
-                            track_id = int(track_ids[i]) if track_ids[i] is not None else None
-                            label = self.model.names[cls_idx] if cls_idx < len(self.model.names) else "unknown"
-                            # Color: try to get from tracked_objects_info, else fallback
-                            color = tracked_objects_info.get(track_id, {}).get('color', [(track_id or 0)*50%255, (track_id or 0)*80%255, (track_id or 0)*120%255])
-                            serializable_detections.append({
-                                "box": box,
-                                "conf": conf,
-                                "cls": cls_idx,
-                                "label": label,
-                                "track_id": track_id,
-                                "color": color
-                            })
-            return {
-                "detections": serializable_detections,
-                "frame_width": frame_width,
-                "frame_height": frame_height,
-                "track_history": track_history_lists
-            }
+            # logger.debug(f"DetectionSystem.get_current_detections_data is returning: {response_data}")
+            return response_data
     # -----------------------------------------
 
     # --- Backend Annotation Control ---
@@ -346,6 +347,64 @@ class DetectionSystem:
             return self.backend_annotation_enabled
     # ----------------------------------
 
+    # --- Filter Management ---
+    def set_track_id_filter(self, track_id):
+        """Sets the active filter to a specific track ID, clearing any label filters."""
+        # Ensure track_id is None or an integer
+        if track_id is not None:
+            try:
+                track_id = int(track_id)
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid track_id provided: {track_id}. Setting filter to None.")
+                track_id = None
+
+        with self.detections_data_lock:
+            self._active_track_id_filter = track_id
+            self._active_label_filter = [] # Clear label filter when setting track ID filter
+            logger.info(f"Filter set to track ID: {self._active_track_id_filter}")
+
+    def set_object_filter(self, labels):
+        """Sets the active filter to a list of labels, clearing any track ID filter."""
+        # Ensure labels is a list or None
+        if labels is None:
+            labels = []
+        elif not isinstance(labels, list):
+             logger.warning(f"Invalid labels provided: {labels}. Setting filter to empty list.")
+             labels = []
+
+        with self.detections_data_lock:
+            self._active_label_filter = labels
+            self._active_track_id_filter = None # Clear track ID filter when setting label filter
+            logger.info(f"Filter set to labels: {self._active_label_filter}")
+
+    def set_label_filter(self, labels_to_filter):
+        """Sets the filter for object labels."""
+        with self.detections_data_lock: # Use the appropriate lock
+            self._active_label_filter = [label.lower().strip() for label in labels_to_filter]
+            logger.info(f"Label filter set to: {self._active_label_filter}")
+
+    def get_track_id_filter(self):
+        """Gets the current active track ID filter."""
+        with self.detections_data_lock:
+            return self._active_track_id_filter
+
+    def get_label_filter(self):
+        """Gets the current active label filter."""
+        with self.detections_data_lock:
+            return self._active_label_filter
+
+    def get_last_frame_dimensions(self):
+        """
+        Returns the dimensions (height, width) of the last processed frame.
+        """
+        with self.detections_data_lock:
+            frame_shape = self.latest_detections_data.get("frame_shape")
+            if frame_shape and len(frame_shape) >= 2:
+                # Assuming shape is (height, width, ...)
+                return frame_shape[0], frame_shape[1]
+        return 0, 0 # Return 0,0 if no frame has been processed yet
+    # -------------------------
+
     # --- Lifecycle Management ---
     def start(self):
         if self.single_image_mode:
@@ -363,9 +422,18 @@ class DetectionSystem:
         logger.info("Starting DetectionSystem threads...")
         self.stop_event.clear()
 
+        # Preserve filter state during restart
+        current_track_id_filter = self._active_track_id_filter
+        current_label_filter = self._active_label_filter.copy()
+
         # Clear queues and reset state SYNCHRONOUSLY
         self._clear_queues_and_reset_state()
         logger.info("Queues and state cleared.")
+
+        # Restore filter state after clearing
+        self._active_track_id_filter = current_track_id_filter
+        self._active_label_filter = current_label_filter
+        logger.info(f"Filter state preserved during start: track_id={self._active_track_id_filter}, labels={self._active_label_filter}")
 
 
         # Instantiate workers, passing necessary dependencies and callbacks
@@ -389,7 +457,8 @@ class DetectionSystem:
             results_update_callback=self.update_detection_results,
             max_track_points=self.max_track_points,
             model_names=model_names,
-            tracker_config_path=CUSTOM_TRACKER_CONFIG
+            tracker_config_path=CUSTOM_TRACKER_CONFIG,
+            tracking_enabled=self.tracking_enabled  # Pass the tracking state
         )
         logger.info("Initializing AnnotationWorker...")
         self.annotation_worker = AnnotationWorker(
@@ -398,7 +467,8 @@ class DetectionSystem:
             annotated_frame_callback=self.update_latest_annotated_frame,
             max_track_points=self.max_track_points,
             model_names=model_names,
-            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled
+            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled,
+            is_render_tracking_enabled_func=self.is_render_tracking_enabled  # Pass the render tracking callback
         )
         logger.info("Worker instances created.")
 
@@ -437,6 +507,7 @@ class DetectionSystem:
             self.latest_annotated_frame = None
         with self.detections_data_lock:
             self.latest_detections_data = {"results": None, "frame_shape": None, "track_history": {}, "tracked_objects_info": {}}
+            # Note: We don't reset filters here anymore, they are managed by the start/change_video_source methods
         with self.detection_images_lock: # Also clear detection images
             self.detection_images.clear()
         logger.info("Queues and state reset complete.")
@@ -486,6 +557,8 @@ class DetectionSystem:
         # Stop detector first (depends on frame queue)
         if self.object_detector:
             logger.debug("Stopping object detector...")
+            # Before stopping, update its filters to None/[] to ensure it doesn't process with old filters if restarted
+            self.object_detector.update_filters(track_id=None, labels=[])
             self.object_detector.stop() # Call the worker's stop method
             self.object_detector = None
 
@@ -541,68 +614,274 @@ class DetectionSystem:
         """Check if tracking and bounding box drawing is enabled."""
         return getattr(self, 'draw_tracking_and_bounding_boxes', True)
 
-    def set_object_filter(self, object_filter):
-        """Set the object filter for displaying specific labels."""
-        if not hasattr(self, 'object_filter'):
-            self.object_filter = None  # Initialize if not present
-        self.object_filter = object_filter
+    # --- Tracking Control ---
+    def enable_tracking(self):
+        """Enable YOLO object tracking."""
+        with self.tracking_lock:
+            self.tracking_enabled = True
+            logger.info("YOLO tracking ENABLED.")
+            # Update the object detector if it exists
+            if self.object_detector:
+                self.object_detector.set_tracking_enabled(True)
 
-    def get_object_filter(self):
-        """Get the current object filter."""
-        return getattr(self, 'object_filter', None)
+    def disable_tracking(self):
+        """Disable YOLO object tracking."""
+        with self.tracking_lock:
+            self.tracking_enabled = False
+            logger.info("YOLO tracking DISABLED.")
+            # Update the object detector if it exists
+            if self.object_detector:
+                self.object_detector.set_tracking_enabled(False)
 
-    def process_single_image(self, image_np):
+    def toggle_tracking(self):
+        """Toggle YOLO object tracking on/off."""
+        with self.tracking_lock:
+            self.tracking_enabled = not self.tracking_enabled
+            status = "ENABLED" if self.tracking_enabled else "DISABLED"
+            logger.info(f"YOLO tracking toggled: {status}.")
+            # Update the object detector if it exists
+            if self.object_detector:
+                self.object_detector.set_tracking_enabled(self.tracking_enabled)
+            return self.tracking_enabled
+
+    def is_tracking_enabled(self):
+        """Check if YOLO object tracking is enabled."""
+        with self.tracking_lock:
+            return self.tracking_enabled
+    # -------------------------
+
+    # --- Tracking Rendering Control ---
+    def enable_render_tracking(self):
+        """Enable rendering of tracking visualizations (track lines, IDs)."""
+        with self.render_tracking_lock:
+            self.render_tracking_enabled = True
+            logger.info("Tracking rendering ENABLED.")
+
+    def disable_render_tracking(self):
+        """Disable rendering of tracking visualizations (track lines, IDs)."""
+        with self.render_tracking_lock:
+            self.render_tracking_enabled = False
+            logger.info("Tracking rendering DISABLED.")
+
+    def toggle_render_tracking(self):
+        """Toggle rendering of tracking visualizations on/off."""
+        with self.render_tracking_lock:
+            self.render_tracking_enabled = not self.render_tracking_enabled
+            status = "ENABLED" if self.render_tracking_enabled else "DISABLED"
+            logger.info(f"Tracking rendering toggled: {status}.")
+            return self.render_tracking_enabled
+
+    def is_render_tracking_enabled(self):
+        """Check if tracking rendering is enabled."""
+        with self.render_tracking_lock:
+            return self.render_tracking_enabled
+    # -------------------------------------
+
+    # --- Backend Annotation Control ---
+    def enable_backend_annotation(self):
+        with self.backend_annotation_lock:
+            self.backend_annotation_enabled = True
+            logger.info("Backend annotation ENABLED.")
+
+    def disable_backend_annotation(self):
+        with self.backend_annotation_lock:
+            self.backend_annotation_enabled = False
+            logger.info("Backend annotation DISABLED.")
+
+    def toggle_backend_annotation(self):
+        with self.backend_annotation_lock:
+            self.backend_annotation_enabled = not self.backend_annotation_enabled
+            status = "ENABLED" if self.backend_annotation_enabled else "DISABLED"
+            logger.info(f"Backend annotation toggled: {status}.")
+            return self.backend_annotation_enabled
+
+    def is_backend_annotation_enabled(self):
+        with self.backend_annotation_lock:
+            return self.backend_annotation_enabled
+    # ----------------------------------
+
+    # --- Single Image Processing ---
+    def process_single_image(self, cv_image, min_confidence=0.4, client_request_time=None):
         """
-        Processes a single image for object detection.
-
+        Process a single image and return detection results in a format compatible with the API.
+        
         Args:
-            image_np (np.ndarray): The image to process (OpenCV format, BGR).
-
+            cv_image: OpenCV image (numpy array)
+            min_confidence: Minimum confidence threshold for detections (default: 0.4)
+            client_request_time: Optional timestamp for request tracking
+            
         Returns:
-            list: A list of detection dictionaries, e.g.,
-                  [{'box': [x_min, y_min, x_max, y_max], 'label': 'person', 'confidence': 0.9}, ...]
+            tuple: (detections_list, frame_shape) where detections_list contains detection dictionaries
         """
-        if not hasattr(self, 'model') or self.model is None:
-            logger.error("YOLO model not loaded. Cannot process single image.")
-            return []
-
-        logger.info(f"Processing single image of shape {image_np.shape}")
+        if cv_image is None:
+            logger.warning("process_single_image: Input image is None")
+            return [], None
+            
         try:
-            # Perform detection
-            # The results object from YOLO might vary slightly depending on the task (detect, track, etc.)
-            # For simple detection, it's usually a list of Results objects.
-            results = self.model.predict(source=image_np, verbose=False) # verbose=False to reduce console output
-
-            serializable_detections = []
-            if results and isinstance(results, list): # results is a list of Results objects
-                for res in results: # Iterate through each Results object (usually one for a single image)
-                    if hasattr(res, "boxes") and res.boxes is not None:
-                        boxes = res.boxes.xyxyn.cpu().numpy()  # Normalized [x_min, y_min, x_max, y_max]
-                        confs = res.boxes.conf.cpu().numpy()
-                        clss = res.boxes.cls.cpu().numpy()
-                        
-                        img_height, img_width = image_np.shape[:2]
-
-                        for i in range(len(boxes)):
-                            box_normalized = boxes[i]
-                            # Denormalize box coordinates
-                            x_min = float(box_normalized[0] * img_width)
-                            y_min = float(box_normalized[1] * img_height)
-                            x_max = float(box_normalized[2] * img_width)
-                            y_max = float(box_normalized[3] * img_height)
-                            
-                            conf = float(confs[i])
-                            cls_idx = int(clss[i])
-                            label = self.model.names[cls_idx] if cls_idx < len(self.model.names) else "unknown"
-
-                            serializable_detections.append({
-                                "box": [x_min, y_min, x_max, y_max], # Standard [x_min, y_min, x_max, y_max]
-                                "label": label,
-                                "confidence": conf
-                            })
-            logger.info(f"Detected {len(serializable_detections)} objects in the single image.")
-            return serializable_detections
+            # Get frame shape
+            frame_shape = cv_image.shape[:2]  # (height, width)
+            
+            # Perform detection using the model directly (similar to ObjectDetector.process_frame)
+            # Determine device (similar to ObjectDetector logic)
+            import platform
+            import torch
+            
+            if platform.system() == "Darwin":  # macOS
+                device = 'mps'
+            elif platform.system() == "Linux":
+                if torch.cuda.is_available():
+                    device = 'cuda:0'
+                else:
+                    device = 'cpu'
+            else:
+                device = 'cpu'
+                
+            # Run detection - use tracking or predict based on tracking_enabled flag
+            with self.tracking_lock:
+                use_tracking = self.tracking_enabled
+            
+            if use_tracking:
+                # Run detection with tracking
+                track_args = {
+                    "source": cv_image,
+                    "persist": False,  # Don't persist tracking for single images
+                    "verbose": False,
+                    "conf": min_confidence,  # Use the provided confidence threshold
+                    "device": device
+                }
+                
+                # Use custom tracker config if available
+                if hasattr(self, 'model') and CUSTOM_TRACKER_CONFIG:
+                    track_args["tracker"] = CUSTOM_TRACKER_CONFIG
+                    
+                results = self.model.track(**track_args)
+            else:
+                # Run detection without tracking
+                results = self.model.predict(
+                    source=cv_image,
+                    verbose=False,
+                    conf=min_confidence,
+                    device=device
+                )
+            
+            detections = []
+            
+            if results and hasattr(results[0], 'boxes') and results[0].boxes is not None:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                confs = results[0].boxes.conf.cpu().numpy()
+                clss = results[0].boxes.cls.cpu().numpy()
+                
+                # Check for segmentation masks
+                masks_xyn = None
+                if hasattr(results[0], 'masks') and results[0].masks is not None:
+                    if hasattr(results[0].masks, 'xyn') and results[0].masks.xyn is not None:
+                        masks_xyn = results[0].masks.xyn
+                        logger.debug(f"Found {len(masks_xyn)} segmentation masks")
+                
+                for i in range(len(boxes)):
+                    box = boxes[i]
+                    conf = float(confs[i])
+                    cls_idx = int(clss[i])
+                    
+                    # Apply confidence filtering again (belt and suspenders approach)
+                    if conf < min_confidence:
+                        continue
+                    
+                    # Get class label
+                    if hasattr(self.model, 'names') and cls_idx < len(self.model.names):
+                        label = self.model.names[cls_idx]
+                    else:
+                        label = f'class_{cls_idx}'
+                    
+                    # Convert bounding box to integer coordinates
+                    x1, y1, x2, y2 = map(int, box)
+                    
+                    # Create detection object in the expected format
+                    detection = {
+                        'label': label,
+                        'confidence': conf,
+                        'boundingBox': {
+                            'x': x1,
+                            'y': y1,
+                            'width': x2 - x1,
+                            'height': y2 - y1
+                        }
+                    }
+                    
+                    # Add segmentation mask if available
+                    if masks_xyn is not None and i < len(masks_xyn) and len(masks_xyn[i]) > 0:
+                        detection['mask_points'] = masks_xyn[i].tolist()
+                        detection['has_mask'] = True
+                    
+                    detections.append(detection)
+                    
+            logger.info(f"process_single_image: Processed image, found {len(detections)} detections above confidence {min_confidence}")
+            return detections, frame_shape
+            
         except Exception as e:
-            logger.exception("Error during single image processing")
-            return []
+            logger.exception(f"Error in process_single_image: {e}")
+            return [], None
+    # ----------------------------------
+
+    # --- Lifecycle Management ---
+    def start(self):
+        if self.single_image_mode:
+            logger.info("DetectionSystem is in single image mode. Workers will not be started.")
+            # Ensure model is loaded, as it's needed for process_single_image
+            if not hasattr(self, 'model') or self.model is None:
+                logger.error("Model not loaded in single image mode. This should not happen if __init__ completed.")
+                raise RuntimeError("Model not loaded, cannot operate in single image mode.")
+            return # Do not start workers
+
+        if self.frame_grabber or self.object_detector or self.annotation_worker:
+            logger.warning("Detection system already running or not properly stopped. Attempting to stop first.")
+            self.stop() # Ensure a clean stop before trying to start again.
+
+        logger.info("Starting DetectionSystem threads...")
+        self.stop_event.clear()
+
+        # Clear queues and reset state SYNCHRONously
+        self._clear_queues_and_reset_state()
+        logger.info("Queues and state cleared.")
+
+
+        # Instantiate workers, passing necessary dependencies and callbacks
+        logger.info(f"Initializing FrameGrabber for source: {self.source_identifier} (type: {self.source_type})")
+        self.frame_grabber = FrameGrabber(
+            source_identifier=self.source_identifier,
+            source_type=self.source_type,
+            frame_queue=self.frame_queue,
+            stop_event=self.stop_event,
+            frame_update_callback=self.update_latest_frame
+        )
+        logger.info("Initializing ObjectDetector...")
+        # Ensure model.names is available, provide an empty list or default if not
+        model_names = self.model.names if hasattr(self.model, 'names') and self.model.names is not None else []
+
+        self.object_detector = ObjectDetector(
+            model=self.model,
+            frame_queue=self.frame_queue,
+            annotation_queue=self.annotation_queue,
+            stop_event=self.stop_event,
+            results_update_callback=self.update_detection_results,
+            max_track_points=self.max_track_points,
+            model_names=model_names,
+            tracker_config_path=CUSTOM_TRACKER_CONFIG,
+            tracking_enabled=self.tracking_enabled  # Pass the tracking state
+        )
+        logger.info("Initializing AnnotationWorker...")
+        self.annotation_worker = AnnotationWorker(
+            annotation_queue=self.annotation_queue,
+            stop_event=self.stop_event,
+            annotated_frame_callback=self.update_latest_annotated_frame,
+            max_track_points=self.max_track_points,
+            model_names=model_names,
+            is_backend_annotation_enabled_func=self.is_backend_annotation_enabled,
+            is_render_tracking_enabled_func=self.is_render_tracking_enabled  # Pass the render tracking callback
+        )
+        logger.info("Worker instances created.")
+
+        # Start threads SYNCHRONOUSLY (the method itself will manage starting threads)
+        self._start_workers()
+        # _start_workers will log success or failure of thread starts and raise error if needed.
 

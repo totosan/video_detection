@@ -6,6 +6,7 @@ import threading
 from collections import deque
 import logging # Import logging
 import platform # Import platform module
+import numpy as np # Added numpy for mask point normalization
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ FRAME_SKIP_FACTOR = 0 # Process every Nth frame (e.g., 2 means process 1, skip 1
 # -------------------
 
 class ObjectDetector:
-    def __init__(self, model, frame_queue, annotation_queue, stop_event, results_update_callback, max_track_points, model_names, tracker_config_path=None): # Add tracker_config_path
+    def __init__(self, model, frame_queue, annotation_queue, stop_event, results_update_callback, max_track_points, model_names, tracker_config_path=None, tracking_enabled=False): # Remove filter_track_id and filter_labels
         self.model = model
         self.frame_queue = frame_queue
         self.annotation_queue = annotation_queue
@@ -24,6 +25,8 @@ class ObjectDetector:
         self.max_track_points = max_track_points
         self.model_names = model_names
         self.tracker_config_path = tracker_config_path # Store the path
+        self.tracking_enabled = tracking_enabled  # Store tracking state
+        self.tracking_lock = threading.Lock()  # Lock for tracking state
         self.thread = None
         # Determine device based on OS
         if platform.system() == "Darwin": # macOS
@@ -47,11 +50,18 @@ class ObjectDetector:
         self.thread = threading.Thread(target=self._detect_objects, daemon=True)
         self.thread.start()
 
+    def set_tracking_enabled(self, enabled):
+        """Update the tracking enabled state."""
+        with self.tracking_lock:
+            self.tracking_enabled = enabled
+            status = "ENABLED" if enabled else "DISABLED"
+            logger.info(f"ObjectDetector tracking {status}")
+
     def _detect_objects(self):
         logger.info("Detection thread started.")
         # Initialize tracking data here, it will be passed back via callback
         track_history = {}  # {track_id: deque(points)}
-        tracked_objects_info = {}  # {track_id: {'name': str, 'last_seen': float, ...}}
+        tracked_objects_info = {}  # {track_id: {\'name\': str, \'last_seen\': float, ...}}
         frame_counter = 0  # Initialize frame counter
 
         try:
@@ -72,54 +82,99 @@ class ObjectDetector:
 
                 # Process the frame using process_frame
                 try:
-                    results, frame_shape = self.process_frame(
+                    # process_frame returns raw results, frame_shape
+                    raw_results, frame_shape_from_process = self.process_frame(
                         frame, track_history, tracked_objects_info
                     )
 
-                    # --- Convert results to serializable detections for annotation ---
                     serializable_detections = []
-                    if results and hasattr(results[0], 'boxes') and results[0].boxes is not None:
-                        boxes = results[0].boxes.xyxy.cpu().numpy()
-                        confs = results[0].boxes.conf.cpu().numpy()
-                        clss = results[0].boxes.cls.cpu().numpy()
-                        track_ids = results[0].boxes.id.cpu().numpy() if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None else [None]*len(boxes)
+                    if raw_results and hasattr(raw_results[0], 'boxes') and raw_results[0].boxes is not None and frame_shape_from_process: # Ensure frame_shape is available
+                        boxes = raw_results[0].boxes.xyxy.cpu().numpy()
+                        confs = raw_results[0].boxes.conf.cpu().numpy()
+                        clss = raw_results[0].boxes.cls.cpu().numpy()
+                        track_ids_tensor = raw_results[0].boxes.id
+                        track_ids = track_ids_tensor.cpu().numpy() if track_ids_tensor is not None else [None]*len(boxes)
+
+                        # Extract segmentation mask points (contours)
+                        masks_xyn = None # Normalized coordinates
+                        masks_xy = None  # Pixel coordinates
+
+                        has_masks_attr = hasattr(raw_results[0], 'masks') and raw_results[0].masks is not None
+
+                        if has_masks_attr:
+                            if hasattr(raw_results[0].masks, 'xyn') and raw_results[0].masks.xyn is not None and len(raw_results[0].masks.xyn) > 0:
+                                masks_xyn = raw_results[0].masks.xyn
+                                logger.debug(f"Found {len(masks_xyn)} normalized segmentation contours (xyn) for serialization")
+                            elif hasattr(raw_results[0].masks, 'xy') and raw_results[0].masks.xy is not None and len(raw_results[0].masks.xy) > 0:
+                                masks_xy = raw_results[0].masks.xy
+                                logger.debug(f"Found {len(masks_xy)} pixel segmentation contours (xy) for serialization")
+                            # Note: We don't use results[0].masks.data here for points,
+                            # that's used by annotation_worker via tracked_objects_info['segmentation_mask']
+
                         for i in range(len(boxes)):
                             box = [int(x) for x in boxes[i]]
                             cls_idx = int(clss[i])
                             label = self.model.names[cls_idx] if cls_idx < len(self.model.names) else 'unknown'
-                            color = ((track_ids[i] * 50) % 255, (track_ids[i] * 80) % 255, (track_ids[i] * 120) % 255) if track_ids[i] is not None else (255,0,0)
-                            serializable_detections.append({
+                            current_track_id = int(track_ids[i]) if track_ids[i] is not None else None
+                            color = ((current_track_id * 50) % 255, (current_track_id * 80) % 255, (current_track_id * 120) % 255) if current_track_id is not None else (255,0,0)
+
+                            detection = {
                                 'box': box,
                                 'label': label,
                                 'color': color,
-                                'track_id': int(track_ids[i]) if track_ids[i] is not None else None
-                            })
-                    # -------------------------------------------------------------
+                                'track_id': current_track_id
+                            }
+
+                            # Add mask points if available
+                            # The frontend expects 'mask_points' with normalized coordinates
+                            added_mask_points = False
+                            if masks_xyn is not None and i < len(masks_xyn) and len(masks_xyn[i]) > 0:
+                                detection['mask_points'] = masks_xyn[i].tolist() # Already normalized
+                                detection['has_mask'] = True
+                                added_mask_points = True
+                            elif masks_xy is not None and i < len(masks_xy) and len(masks_xy[i]) > 0 and \
+                                 frame_shape_from_process and len(frame_shape_from_process) == 2:
+                                # frame_shape_from_process is (height, width)
+                                # masks_xy[i] is a numpy array of [[x,y], [x,y], ...]
+                                # Ensure points are not empty before division
+                                normalized_points = (masks_xy[i] / np.array([frame_shape_from_process[1], frame_shape_from_process[0]])).tolist()
+                                detection['mask_points'] = normalized_points
+                                detection['has_mask'] = True
+                                added_mask_points = True
+
+                            if not added_mask_points and has_masks_attr:
+                                # If masks attribute exists (e.g. results[0].masks.data was found)
+                                # but we couldn't get .xyn or .xy points for this specific detection.
+                                detection['has_mask'] = True # For annotation worker
+                                logger.debug(f"Mask data might exist for detection {i} (used by annotation worker), but no contour points (xyn/xy) extracted for API.")
+
+                            serializable_detections.append(detection)
+                        # -------------------------------------------------------------
 
                     # Enqueue serializable detection data and frame for annotation
-                    if serializable_detections:
-                        try:
-                            self.annotation_queue.put_nowait((
-                                serializable_detections,
-                                frame_shape,
-                                track_history,
-                                tracked_objects_info,
-                                frame.copy()  # Send the frame that was actually processed
-                            ))
-                        except queue.Full:
-                            logger.warning("Annotation queue is full; dropping frame annotation task.")
+                    # Always enqueue the full, unfiltered list for the annotation worker
+                    try:
+                        self.annotation_queue.put_nowait((\
+                            serializable_detections,\
+                            frame_shape_from_process, # Use the shape from process_frame
+                            track_history,\
+                            tracked_objects_info,\
+                            frame.copy()  # Send the frame that was actually processed
+                        ))
+                    except queue.Full:
+                        logger.warning("Annotation queue is full; dropping frame annotation task.")
 
-                    # Update central state with raw detection data from the processed frame
+                    # Update central state with PROCESSED detection data
                     self.results_update_callback(
-                        results,
-                        frame_shape,
+                        serializable_detections, # Pass the processed list of dicts
+                        frame_shape_from_process,
                         track_history,
                         tracked_objects_info
                     )
                 except Exception as e:
-                    logger.exception(f"Error processing frame {frame_counter}: {e}")
-                    # Invoke callback with default data to avoid blocking
-                    self.results_update_callback(None, None, {}, {})
+                    logger.exception(f"Error processing frame {frame_counter} or preparing serializable data: {e}")
+                    # Invoke callback with empty/default data to avoid blocking or stale data
+                    self.results_update_callback([], None, {}, {})
 
                 # Mark the task from frame_queue as done
                 self.frame_queue.task_done()
@@ -159,19 +214,34 @@ class ObjectDetector:
             logger.warning("Frame is None, skipping processing.")
             return None, None
 
-        # Perform detection using the determined device
-        track_args = {
-            "source": frame,
-            "persist": True,  # Important for tracking across skipped frames
-            "verbose": False,
-            "conf": 0.25,
-            "vid_stride":3,
-            "device": self.device
-        }
-        if self.tracker_config_path:
-            track_args["tracker"] = self.tracker_config_path
+        # Check if tracking is enabled
+        with self.tracking_lock:
+            use_tracking = self.tracking_enabled
 
-        results = self.model.track(**track_args)
+        # Perform detection using the determined device
+        if use_tracking:
+            # Use tracking
+            track_args = {
+                "source": frame,
+                "persist": True,  # Important for tracking across frames
+                "verbose": False,
+                "conf": 0.25,
+                "vid_stride":3,
+                "device": self.device
+            }
+            if self.tracker_config_path:
+                track_args["tracker"] = self.tracker_config_path
+
+            results = self.model.track(**track_args)
+        else:
+            # Use simple prediction without tracking
+            results = self.model.predict(
+                source=frame,
+                verbose=False,
+                conf=0.25,
+                device=self.device
+            )
+        
         frame_shape = frame.shape[:2]  # Store height, width of the processed frame
 
         if results and results[0].boxes is not None:
@@ -180,52 +250,101 @@ class ObjectDetector:
             cls = results[0].boxes.cls.cpu().numpy()
             track_ids = None
 
+            # Check if we have segmentation masks
+            has_segmentation = hasattr(results[0], 'masks') and results[0].masks is not None
+            if has_segmentation:
+                logger.debug("Segmentation masks detected from YOLOv11n-seg model")
+
+            # Get masks if they exist
+            masks = None
+            if has_segmentation:
+                try:
+                    masks = results[0].masks.data.cpu().numpy()
+                    logger.debug(f"Found {len(masks)} segmentation masks")
+                except Exception as e:
+                    logger.warning(f"Error extracting segmentation masks: {e}")
+
             if hasattr(results[0].boxes, 'id') and results[0].boxes.id is not None:
                 track_ids = results[0].boxes.id.cpu().numpy()
+            else:
+                # No tracking IDs available (tracking disabled), use None for all
+                track_ids = [None] * len(boxes)
+                logger.debug("No tracking IDs available - tracking is disabled or not supported")
 
-                # Extract tracked detections
-                for box, conf, cl, track_id in zip(boxes, confs, cls, track_ids):
-                    x1, y1, x2, y2 = map(int, box)
-                    track_id = int(track_id)
+            # Process detections (with or without tracking)
+            for i, (box, conf, cl) in enumerate(zip(boxes, confs, cls)):
+                x1, y1, x2, y2 = map(int, box)
+                
+                # Get track_id if available
+                track_id = None
+                if track_ids[i] is not None:
+                    track_id = int(track_ids[i])
 
-                    # Ensure coordinates are within frame boundaries
-                    x1 = max(0, x1)
-                    y1 = max(0, y1)
-                    x2 = min(frame.shape[1], x2)
-                    y2 = min(frame.shape[0], y2)
+                # Ensure coordinates are within frame boundaries
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(frame.shape[1], x2)
+                y2 = min(frame.shape[0], y2)
 
-                    # Generate color based on track_id
+                # Generate color based on track_id (or use default if no tracking)
+                if track_id is not None:
                     color = ((track_id * 50) % 255, (track_id * 80) % 255, (track_id * 120) % 255)
+                else:
+                    color = (255, 0, 0)  # Default red color when tracking is off
 
-                    # Only store if region is valid
-                    if x2 > x1 and y2 > y1:
-                        try:
-                            # Make a copy of the region to avoid reference issues
-                            detection_region = frame[y1:y2, x1:x2].copy()
-                            # Add detection image to tracked_objects_info
-                            tracked_objects_info[track_id] = tracked_objects_info.get(track_id, {})
-                            tracked_objects_info[track_id]['detection_image'] = detection_region
-                            logger.debug(f"✅ Stored image for track ID {track_id}, region shape: {detection_region.shape}")
-                        except Exception as e:
-                            logger.exception(f"Error storing image for track ID {track_id}: {e}")
-                    else:
-                        logger.warning(f"Invalid bounding box for track ID {track_id}: (x1={x1}, y1={y1}, x2={x2}, y2={y2})")
+                # Get mask for this detection if available
+                mask = None
+                if masks is not None and i < len(masks):
+                    mask = masks[i]
+                    logger.debug(f"Found mask for detection {i}, shape: {mask.shape}")
 
-                    # Update track history
+                # Only store if region is valid
+                if x2 > x1 and y2 > y1:
+                    try:
+                        # Make a copy of the region to avoid reference issues
+                        detection_region = frame[y1:y2, x1:x2].copy()
+                        
+                        # Use track_id if available, otherwise use index i as a temporary ID
+                        storage_id = track_id if track_id is not None else f"temp_{i}"
+                        
+                        # Add detection image to tracked_objects_info
+                        tracked_objects_info[storage_id] = tracked_objects_info.get(storage_id, {})
+                        tracked_objects_info[storage_id]['detection_image'] = detection_region
+
+                        # Store the mask if we have one
+                        if mask is not None:
+                            # Store the mask
+                            tracked_objects_info[storage_id]['segmentation_mask'] = mask
+                            logger.debug(f"Stored segmentation mask for ID {storage_id}")
+
+                        logger.debug(f"✅ Stored image for ID {storage_id}, region shape: {detection_region.shape}")
+                    except Exception as e:
+                        logger.exception(f"Error storing image for ID {storage_id}: {e}")
+                else:
+                    logger.warning(f"Invalid bounding box for detection {i}: (x1={x1}, y1={y1}, x2={x2}, y2={y2})")
+
+                # Update track history only if we have a track_id
+                if track_id is not None:
                     if track_id not in track_history:
                         track_history[track_id] = deque(maxlen=self.max_track_points)
                     track_history[track_id].append(((x1 + x2) // 2, (y1 + y2) // 2))
 
-                    # Retrieve class name
-                    class_name = self.model.names[int(cl)] if int(cl) < len(self.model.names) else "unknown"
-                    logger.debug(f"Assigned class name '{class_name}' for track ID {track_id}")
+                # Retrieve class name
+                class_name = self.model.names[int(cl)] if int(cl) < len(self.model.names) else "unknown"
+                logger.debug(f"Assigned class name '{class_name}' for detection {i}")
 
-                    # Update tracked_objects_info
-                    tracked_objects_info[track_id].update({
-                        'name': class_name,
-                        'last_seen': time.time(),
-                        'last_box': (x1, y1, x2, y2),
-                        'color': color
-                    })
+                # Update tracked_objects_info
+                storage_id = track_id if track_id is not None else f"temp_{i}"
+                tracked_objects_info[storage_id].update({
+                    'name': class_name,
+                    'last_seen': time.time(),
+                    'last_box': (x1, y1, x2, y2),
+                    'color': color
+                })
 
         return results, frame_shape
+
+    def update_filters(self, track_id=None, labels=None):
+        """Updates the filtering criteria for the object detector."""
+        # No filtering logic is applied in this version
+        logger.info(f"ObjectDetector filters updated: track_id={track_id}, labels={labels}")

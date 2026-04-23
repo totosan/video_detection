@@ -8,6 +8,8 @@ const API_ENDPOINTS = {
     CURRENT_DETECTIONS: "/api/current_detections",
     TRACKING_STATUS: "/api/tracking_status",
     TRACKING_TOGGLE: "/api/toggle_tracking",
+    TRACK_ID_FILTER_GET: "/api/get_track_id_filter",
+    TRACK_ID_FILTER_SET: "/api/set_track_id_filter",
 };
 
 const UPDATE_INTERVALS = {
@@ -19,6 +21,7 @@ const UPDATE_INTERVALS = {
 let originalFrameWidth = null;
 let originalFrameHeight = null;
 let currentObjectFilter = [];
+let currentTrackIdFilter = null; // Track ID filter (null = no filter, number = specific track ID)
 
 // DOM Elements (to be cached on DOMContentLoaded)
 let toggleBtn, statusSpan, debugRenderingContainer, videoFeed, canvas, ctx,
@@ -112,21 +115,35 @@ async function fetchObjectFilterForInput() { // Primarily populates the input an
 
 async function updateCurrentFilterStatusLabel() { // Primarily updates the status label, also refreshes global var
     try {
-        const response = await fetch(API_ENDPOINTS.OBJECT_FILTER_GET); // Fetch to get the latest
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
-        currentObjectFilter = data.object_filter || []; // Update global state
+        const trackIdResponse = await fetch(API_ENDPOINTS.TRACK_ID_FILTER_GET);
+        if (!trackIdResponse.ok) throw new Error(`HTTP error! status: ${trackIdResponse.status}`);
+        const trackIdData = await trackIdResponse.json();
 
-        if (currentFilterStatusLabel) {
-            if (currentObjectFilter.length > 0) {
-                currentFilterStatusLabel.textContent = currentObjectFilter.join(", ");
+        const objectFilterResponse = await fetch(API_ENDPOINTS.OBJECT_FILTER_GET);
+        if (!objectFilterResponse.ok) throw new Error(`HTTP error! status: ${objectFilterResponse.status}`);
+        const objectFilterData = await objectFilterResponse.json();
+
+        const trackIdFilter = trackIdData.track_id_filter;
+        const objectFilter = objectFilterData.object_filter || [];
+
+        // Update global state variables
+        currentTrackIdFilter = trackIdFilter;
+        currentObjectFilter = objectFilter;
+
+        const filterStatusLabel = document.getElementById("currentFilterStatusLabel");
+        if (filterStatusLabel) {
+            if (trackIdFilter !== null) {
+                filterStatusLabel.textContent = `Track ID: ${trackIdFilter}`;
+            } else if (objectFilter.length > 0) {
+                filterStatusLabel.textContent = `Labels: ${objectFilter.join(", ")}`;
             } else {
-                currentFilterStatusLabel.textContent = "None (all objects shown)";
+                filterStatusLabel.textContent = "None (all objects shown)";
             }
         }
     } catch (error) {
-        console.error("Error fetching current filter status for label:", error);
-        if (currentFilterStatusLabel) currentFilterStatusLabel.textContent = "Error loading status";
+        console.error("Error updating filter status label:", error);
+        const filterStatusLabel = document.getElementById("currentFilterStatusLabel");
+        if (filterStatusLabel) filterStatusLabel.textContent = "Error loading status";
     }
 }
 
@@ -144,14 +161,88 @@ async function setObjectFilter() {
         console.log("Object filter set to:", data.object_filter);
         currentObjectFilter = data.object_filter || []; // Update global filter
         updateCurrentFilterStatusLabel(); // Refresh the displayed active filter status
+        displayFeedback("Object filter set successfully.");
     } catch (error) {
         console.error("Error setting object filter:", error);
+        displayFeedback("Failed to set object filter.", true);
+    }
+}
+
+async function displayFeedback(message, isError = false) {
+    const feedbackElement = document.getElementById("feedbackMessage");
+    if (feedbackElement) {
+        feedbackElement.textContent = message;
+        feedbackElement.style.color = isError ? "red" : "green";
+        feedbackElement.style.display = "block";
+        setTimeout(() => {
+            feedbackElement.style.display = "none";
+        }, 3000); // Hide after 3 seconds
+    }
+}
+
+async function setTrackIdFilter() {
+    const trackIdInput = document.getElementById("trackIdFilterInput");
+    if (!trackIdInput) return;
+
+    const trackIdValue = trackIdInput.value.trim();
+    try {
+        const response = await fetch(API_ENDPOINTS.TRACK_ID_FILTER_SET, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ track_id: trackIdValue ? parseInt(trackIdValue, 10) : null })
+        });
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        console.log("Track ID filter set to:", data.track_id_filter);
+        updateCurrentFilterStatusLabel();
+        displayFeedback("Track ID filter set successfully.");
+    } catch (error) {
+        console.error("Error setting track ID filter:", error);
+        displayFeedback("Failed to set Track ID filter.", true);
+    }
+}
+
+async function clearFilters() {
+    try {
+        const trackIdResponse = await fetch(API_ENDPOINTS.TRACK_ID_FILTER_SET, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ track_id: null })
+        });
+        if (!trackIdResponse.ok) throw new Error(`HTTP error! status: ${trackIdResponse.status}`);
+
+        const objectFilterResponse = await fetch(API_ENDPOINTS.OBJECT_FILTER_SET, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ object_filter: [] })
+        });
+        if (!objectFilterResponse.ok) throw new Error(`HTTP error! status: ${objectFilterResponse.status}`);
+
+        console.log("All filters cleared.");
+        updateCurrentFilterStatusLabel();
+        displayFeedback("Filters cleared successfully.");
+    } catch (error) {
+        console.error("Error clearing filters:", error);
+        displayFeedback("Failed to clear filters.", true);
     }
 }
 
 function setupObjectFilterControls() {
     if (setObjectFilterBtn) {
         setObjectFilterBtn.addEventListener("click", setObjectFilter);
+    }
+}
+
+function setupTrackIdFilterControls() {
+    const setTrackIdFilterBtn = document.getElementById("setTrackIdFilterBtn");
+    const clearFilterBtn = document.getElementById("clearFilterBtn");
+
+    if (setTrackIdFilterBtn) {
+        setTrackIdFilterBtn.addEventListener("click", setTrackIdFilter);
+    }
+
+    if (clearFilterBtn) {
+        clearFilterBtn.addEventListener("click", clearFilters);
     }
 }
 
@@ -173,57 +264,154 @@ async function fetchAndDrawDetections() {
     try {
         const response = await fetch(API_ENDPOINTS.CURRENT_DETECTIONS);
         if (!response.ok) {
-            console.error("Failed to fetch detections:", response.statusText);
+            console.error("Failed to fetch detections:", response.status, response.statusText);
+            try {
+                const errorData = await response.json();
+                console.error("Error data from API:", errorData);
+            } catch (e) {
+                // Ignore if error response is not JSON
+            }
             requestAnimationFrame(fetchAndDrawDetections); // Try again on next frame
             return;
         }
         const data = await response.json();
 
+        console.log("Received detections data:", JSON.stringify(data, null, 2)); // Log the full data structure
+
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        if (!data.detections || data.detections.length === 0) {
+        // Validate the structure of the received data
+        if (!data || typeof data !== 'object') {
+            console.error("API response data is missing or not an object.");
+            requestAnimationFrame(fetchAndDrawDetections);
+            return;
+        }
+
+        if (!Array.isArray(data.detections)) {
+            console.error("API response 'data.detections' is missing or not an array.");
+            requestAnimationFrame(fetchAndDrawDetections);
+            return;
+        }
+        
+        // data.frame_shape is expected to be [height, width] or null
+        
+        if (data.detections.length === 0) {
+            // console.log("No detections in this frame."); // Optional: less verbose log
             requestAnimationFrame(fetchAndDrawDetections); // Continue loop even if no detections
             return;
         }
 
-        // Ensure original frame dimensions are set (once)
-        if (!originalFrameWidth || !originalFrameHeight) {
-            originalFrameWidth = data.frame_width;
-            originalFrameHeight = data.frame_height;
+        // Update original frame dimensions if available and not yet set
+        if ((!originalFrameWidth || !originalFrameHeight) && 
+            data.frame_shape && 
+            Array.isArray(data.frame_shape) && 
+            data.frame_shape.length === 2) {
+            
+            originalFrameHeight = data.frame_shape[0]; // height
+            originalFrameWidth = data.frame_shape[1];  // width
+
+            if (originalFrameHeight <= 0 || originalFrameWidth <= 0) {
+                console.warn(`Received frame_shape with zero or negative dimension: [${originalFrameHeight}, ${originalFrameWidth}]. Will use canvas size as fallback for scaling.`);
+                originalFrameHeight = null; // Reset to allow fallback
+                originalFrameWidth = null;  // Reset to allow fallback
+            }
         }
         
-        // Prevent division by zero if frame dimensions are not yet available or are zero
-        const scaleX = canvas.width / (originalFrameWidth || 1);
-        const scaleY = canvas.height / (originalFrameHeight || 1);
+        // Determine scaling factors. Fallback to canvas dimensions if original dimensions are unknown or invalid.
+        const baseWidthForScale = (originalFrameWidth && originalFrameWidth > 0) ? originalFrameWidth : canvas.width;
+        const baseHeightForScale = (originalFrameHeight && originalFrameHeight > 0) ? originalFrameHeight : canvas.height;
+
+        // Prevent division by zero if base dimensions are still zero (e.g. canvas not rendered yet, or invalid originalFrame values)
+        const scaleX = canvas.width / (baseWidthForScale || 1);
+        const scaleY = canvas.height / (baseHeightForScale || 1);
 
         data.detections.forEach(det => {
-            // Use the global currentObjectFilter
-            if (currentObjectFilter.length > 0 && !currentObjectFilter.includes(det.label)) {
-                return; // Skip if filter is active and label doesn"t match
+            // Apply track ID filter first (takes priority over label filter)
+            if (currentTrackIdFilter !== null && det.track_id !== currentTrackIdFilter) {
+                return; // Skip if track ID filter is active and this detection doesn't match
             }
 
-            const [x1, y1, x2, y2] = det.box;
+            // Apply object label filter (only if track ID filter is not active)
+            if (currentTrackIdFilter === null && currentObjectFilter.length > 0 && !currentObjectFilter.includes(det.label)) {
+                return; // Skip if label filter is active and label doesn't match
+            }
+
+            const [x1, y1, x2, y2] = det.box; // Still useful for label positioning
             const label = det.label || "unknown";
             const color = det.color ? `rgb(${det.color[0]}, ${det.color[1]}, ${det.color[2]})` : "red";
+            const trackId = det.track_id || "unknown";
 
             const canvasX1 = x1 * scaleX;
             const canvasY1 = y1 * scaleY;
-            const canvasW = (x2 - x1) * scaleX;
-            const canvasH = (y2 - y1) * scaleY;
+            // const canvasW = (x2 - x1) * scaleX; // Not directly used for masks, but good for context
+            // const canvasH = (y2 - y1) * scaleY; // Not directly used for masks
 
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 2;
-            ctx.strokeRect(canvasX1, canvasY1, canvasW, canvasH);
+            // Check for segmentation mask data
+            // Assuming det.mask_points is an array of [x,y] normalized to 0-1 range
+            if (det.mask_points && Array.isArray(det.mask_points) && det.mask_points.length > 0) {
+                ctx.fillStyle = color.replace('rgb', 'rgba').replace(')', ', 0.5)'); // Semi-transparent fill
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
 
-            ctx.fillStyle = color;
-            const text = `${label} (ID: ${det.track_id || "unknown"})`;
-            ctx.font = "12px Arial";
-            const textMetrics = ctx.measureText(text);
-            const textHeight = 12; // Approximate height for "12px Arial"
-            ctx.fillRect(canvasX1, canvasY1 - textHeight - 4, textMetrics.width + 4, textHeight + 4);
+                ctx.beginPath();
+                // Scale normalized mask points by canvas dimensions directly
+                ctx.moveTo(det.mask_points[0][0] * canvas.width, det.mask_points[0][1] * canvas.height);
+                for (let i = 1; i < det.mask_points.length; i++) {
+                    if (Array.isArray(det.mask_points[i]) && det.mask_points[i].length === 2) {
+                        ctx.lineTo(det.mask_points[i][0] * canvas.width, det.mask_points[i][1] * canvas.height);
+                    } else {
+                        console.warn("Invalid point in mask_points array:", det.mask_points[i]);
+                    }
+                }
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+            } else {
+                // Fallback to drawing bounding box if no mask points or if mask_points is invalid
+                // Ensure det.box is valid before trying to draw
+                if (det.box && Array.isArray(det.box) && det.box.length === 4) {
+                    const [x1, y1, x2, y2] = det.box;
+                    const rectX = x1 * scaleX;
+                    const rectY = y1 * scaleY;
+                    const rectW = (x2 - x1) * scaleX;
+                    const rectH = (y2 - y1) * scaleY;
+                    
+                    // Only draw if width and height are positive
+                    if (rectW > 0 && rectH > 0) {
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(rectX, rectY, rectW, rectH);
+                    }
+                } else {
+                    console.warn("Fallback to bounding box: det.box is invalid", det.box);
+                }
+            }
 
-            ctx.fillStyle = "white";
-            ctx.fillText(text, canvasX1 + 2, canvasY1 - 4);
+            // Draw label (position based on the top-left of the bounding box)
+            // Ensure det.box is valid for label positioning as well
+            if (det.box && Array.isArray(det.box) && det.box.length === 4) {
+                const [x1, y1, , ] = det.box; // Only need x1, y1 for label anchor
+                const labelAnchorX = x1 * scaleX;
+                const labelAnchorY = y1 * scaleY;
+
+                ctx.fillStyle = color;
+                const text = `${label} (ID: ${trackId})`;
+                ctx.font = "12px Arial";
+                const textMetrics = ctx.measureText(text);
+                const textHeight = 12; // Approximate height for "12px Arial"
+                
+                // Ensure label is within canvas bounds
+                let labelX = labelAnchorX;
+                let labelY = labelAnchorY - textHeight - 4;
+                if (labelY < 0) labelY = labelAnchorY + textHeight + 4; // If too high, draw below
+                if (labelX + textMetrics.width + 4 > canvas.width) labelX = canvas.width - textMetrics.width - 4; // Adjust if too wide
+                if (labelX < 0) labelX = 0;
+
+
+                ctx.fillRect(labelX, labelY, textMetrics.width + 4, textHeight + 4);
+                ctx.fillStyle = "white";
+                ctx.fillText(text, labelX + 2, labelY + textHeight); // Adjusted y for fillText
+            }
         });
     } catch (error) {
         console.error("Error fetching or drawing detections:", error);
@@ -233,11 +421,16 @@ async function fetchAndDrawDetections() {
 
 // --- Camera Selection --- 
 async function fetchAvailableCameras() {
-    if (!cameraSelectList) return;
+    console.log("fetchAvailableCameras called");
+    if (!cameraSelectList) {
+        console.error("cameraSelectList element not found");
+        return;
+    }
     try {
         const response = await fetch("/api/cams");
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const cameras = await response.json();
+        console.log("Available cameras:", cameras);
 
         cameraSelectList.innerHTML = ''; // Clear existing options
 
@@ -246,6 +439,7 @@ async function fetchAvailableCameras() {
             option.value = "";
             option.textContent = "No cameras found";
             cameraSelectList.appendChild(option);
+            console.log("No cameras found");
             return;
         }
 
@@ -258,6 +452,7 @@ async function fetchAvailableCameras() {
             option.textContent = `${cam.name} (Index: ${cam.index}, ${cam.width}x${cam.height})`;
             cameraSelectList.appendChild(option);
         });
+        console.log("Camera list populated successfully");
     } catch (error) {
         console.error("Error fetching available cameras:", error);
         if (cameraSelectList) {
@@ -268,10 +463,15 @@ async function fetchAvailableCameras() {
 }
 
 async function setSelectedVideoSource() {
-    if (!setVideoSourceBtn || !videoSourceStatus) return; // cameraSelectList and rtspUrlInput checked below
+    console.log("setSelectedVideoSource function called");
+    if (!setVideoSourceBtn || !videoSourceStatus) {
+        console.error("Required elements not found: setVideoSourceBtn or videoSourceStatus");
+        return; // cameraSelectList and rtspUrlInput checked below
+    }
 
     let selectedSourceIdentifier = "";
     const rtspValue = rtspUrlInput ? rtspUrlInput.value.trim() : "";
+    console.log("RTSP input value:", rtspValue);
 
     if (rtspValue) {
         selectedSourceIdentifier = rtspValue;
@@ -281,6 +481,7 @@ async function setSelectedVideoSource() {
         selectedSourceIdentifier = cameraSelectList.value;
         console.log("Using selected camera from dropdown:", selectedSourceIdentifier);
     } else {
+        console.warn("No source selected");
         videoSourceStatus.textContent = "Please select a camera or enter an RTSP URL.";
         return;
     }
@@ -347,8 +548,13 @@ async function setSelectedVideoSource() {
 }
 
 function setupCameraControls() {
+    console.log("setupCameraControls called");
+    console.log("setVideoSourceBtn element:", setVideoSourceBtn);
     if (setVideoSourceBtn) {
         setVideoSourceBtn.addEventListener("click", setSelectedVideoSource);
+        console.log("Event listener added to setVideoSourceBtn");
+    } else {
+        console.error("setVideoSourceBtn element not found");
     }
 }
 
@@ -356,86 +562,36 @@ function setupCameraControls() {
 function updateTrackedObjectsList() {
     if (!trackedObjectsList) return;
 
-    fetch(API_ENDPOINTS.TRACKED_OBJECTS)
+    // Fetch current detections instead of filtered tracked_objects to always display items
+    fetch(API_ENDPOINTS.CURRENT_DETECTIONS)
         .then(response => {
             if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
             return response.json();
         })
         .then(data => {
-            const fragment = document.createDocumentFragment(); // Use DocumentFragment
-
-            if (!Array.isArray(data)) {
-                console.error("Tracked objects data is not an array:", data);
-                const errorItem = document.createElement("li");
-                errorItem.textContent = "Error: Invalid data format from server.";
-                fragment.appendChild(errorItem);
-            } else if (data.length === 0) {
-                const noObjectsItem = document.createElement("li");
-                noObjectsItem.textContent = "No objects tracked recently.";
-                fragment.appendChild(noObjectsItem);
+            const fragment = document.createDocumentFragment();
+            const detections = Array.isArray(data.detections) ? data.detections : [];
+            if (detections.length === 0) {
+                const item = document.createElement("li");
+                item.textContent = "No objects detected.";
+                fragment.appendChild(item);
             } else {
-                try {
-                    data.sort((a, b) => { // Sort by time_since_seen (most recent first)
-                        const timeA = parseFloat(a.time_since_seen);
-                        const timeB = parseFloat(b.time_since_seen);
-                        if (isNaN(timeA) && isNaN(timeB)) return 0;
-                        if (isNaN(timeA)) return 1; // Push NaNs to the end
-                        if (isNaN(timeB)) return -1;
-                        return timeA - timeB; // Ascending sort
-                    });
-                } catch (e) {
-                    console.error("Error sorting tracked objects:", e, data);
-                    const errorItem = document.createElement("li");
-                    errorItem.textContent = "Error: Could not sort object data.";
-                    fragment.appendChild(errorItem);
-                    // Clear list and append only the error
-                    trackedObjectsList.innerHTML = "";
-                    trackedObjectsList.appendChild(fragment);
-                    return; 
-                }
-                
-                const limitedData = data.slice(0, 5); // Limit to 5 most recent
-
-                limitedData.forEach(obj => {
+                detections.forEach(det => {
                     const listItem = document.createElement("li");
-                    listItem.className = "list-group-item"; // Bootstrap class, ensure it"s defined in your CSS if used
+                    listItem.className = "list-group-item";
+                    listItem.textContent = `ID: ${det.id}, Name: ${det.name}`;
                     listItem.style.cursor = "pointer";
-
-                    if (obj.time_since_seen < 3.0) {
-                        listItem.classList.add("recent");
-                    } else {
-                        listItem.classList.add("stale");
-                    }
-
-                    if (obj.detection_image) {
-                        const img = document.createElement("img");
-                        img.src = "data:image/jpeg;base64," + obj.detection_image;
-                        img.alt = `Object ${obj.id}`;
-                        img.style.width = "60px";
-                        img.style.height = "60px";
-                        img.style.marginRight = "10px";
-                        listItem.appendChild(img);
-                    }
-
-                    // Ensure time_since_seen is a number before calling toFixed
-                    const timeSinceSeenText = typeof obj.time_since_seen === "number" ? obj.time_since_seen.toFixed(1) : obj.time_since_seen;
-                    const textNode = document.createTextNode(
-                        `ID: ${obj.id}, Name: ${obj.name}, Seen: ${timeSinceSeenText}s ago`
-                    );
-                    listItem.appendChild(textNode);
-
                     listItem.addEventListener("click", () => {
-                        if (obj.name && objectFilterInput) {
-                            objectFilterInput.value = obj.name;
-                            setObjectFilter(); // Apply the filter
-                            console.log(`Filter set to "${obj.name}" by clicking tracked object.`);
+                        if (det.name && objectFilterInput) {
+                            objectFilterInput.value = det.name;
+                            setObjectFilter();
                         }
                     });
                     fragment.appendChild(listItem);
                 });
             }
-            trackedObjectsList.innerHTML = ""; // Clear current list once
-            trackedObjectsList.appendChild(fragment); // Append all new items
+            trackedObjectsList.innerHTML = "";
+            trackedObjectsList.appendChild(fragment);
         })
         .catch(error => {
             console.error("Error fetching tracked objects:", error);
@@ -514,30 +670,48 @@ function initializeApp() {
     }
     window.addEventListener("resize", resizeCanvas);
     
+    // Initial setup calls
+    fetchDebugRenderingStatus();
+    fetchObjectFilterForInput(); // Get initial filter state for the input box
+    updateCurrentFilterStatusLabel(); // Get initial filter state for the status label
+    fetchAvailableCameras();
+    fetchTrackingStatus();
+    updateTrackedObjectsList(); // Initial call to populate tracked objects list
+
+    // Setup event listeners
     setupDebugRenderingToggle();
     setupObjectFilterControls();
+    setupTrackIdFilterControls();
     setupTrackingToggle();
-
-    // Fetch initial states
-    fetchDebugRenderingStatus();
-    fetchObjectFilterForInput();       // Populates input and currentObjectFilter
-    updateCurrentFilterStatusLabel();  // Updates the label based on (potentially just fetched) currentObjectFilter
-    fetchTrackingStatus();
-    updateTrackedObjectsList();        // Initial call for tracked objects
-
-    // Start loops
-    requestAnimationFrame(fetchAndDrawDetections); // Start drawing loop
-
-    setInterval(updateTrackedObjectsList, UPDATE_INTERVALS.TRACKED_OBJECTS);
-    setInterval(updateCurrentFilterStatusLabel, UPDATE_INTERVALS.FILTER_STATUS); // Periodically update filter status label
-
-    // Fetch and populate cameras
-    fetchAvailableCameras();
     setupCameraControls();
+
+    // Start periodic updates
+    setInterval(updateTrackedObjectsList, UPDATE_INTERVALS.TRACKED_OBJECTS); // Update tracked objects list every 1 second
+    setInterval(updateCurrentFilterStatusLabel, UPDATE_INTERVALS.FILTER_STATUS); // Update filter status every 5 seconds
+
+    // Start the drawing loop
+    requestAnimationFrame(fetchAndDrawDetections);
 }
 
-// Wait for the DOM to be fully loaded before initializing
+// Initialize app on DOMContentLoaded
 document.addEventListener("DOMContentLoaded", initializeApp);
 
-// Remove obsolete function (if it was in the original HTML script block)
-// function updateTrackedObjects() { /* ... */ } // This is now removed.
+// Debug function to test camera source selection
+function testCameraButton() {
+    console.log("Testing camera button...");
+    const btn = document.getElementById("setVideoSourceBtn");
+    console.log("Button found:", btn);
+    if (btn) {
+        console.log("Button onclick:", btn.onclick);
+        console.log("Button addEventListener count:", btn.getEventListeners ? btn.getEventListeners('click').length : 'getEventListeners not available');
+    }
+    
+    const select = document.getElementById("cameraSelectList");
+    console.log("Select element found:", select);
+    if (select) {
+        console.log("Select options:", select.options.length);
+    }
+}
+
+// Call test function after a delay to ensure DOM is ready
+setTimeout(testCameraButton, 2000);

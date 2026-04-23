@@ -21,10 +21,31 @@
             </div>
 
             <div class="controls">
-                <label for="objectFilterInput">Object Filter (comma-separated):</label>
+                <label for="objectFilterInput">Object Label Filter (comma-separated):</label>
                 <input type="text" id="objectFilterInput" placeholder="e.g., car,person">
-                <button id="setObjectFilterBtn">Set Filter</button>
-                <div style="margin-top: 5px;">Current Active Filter: <strong id="currentFilterStatusLabel">Loading...</strong></div>
+                <button id="setObjectFilterBtn">Set Label Filter</button>
+            </div>
+
+            <div class="controls"> <!-- New Track ID Filter Controls -->
+                <label for="trackIdFilterInput">Track ID Filter:</label>
+                <input type="number" id="trackIdFilterInput" placeholder="e.g., 123">
+                <button id="setTrackIdFilterBtn">Set Track ID Filter</button>
+            </div>
+
+            <div class="controls"> <!-- Clear Filter Button -->
+                <button id="clearFilterBtn">Clear All Filters</button>
+            </div>
+
+            <div class="controls"> <!-- Select Closest Object Button -->
+                <button id="selectClosestObjectBtn">Select Closest Object</button>
+            </div>
+
+            <div class="controls">
+                 Current Active Filter: <strong id="currentFilterStatusLabel">Loading...</strong>
+            </div>
+
+            <div class="controls"> <!-- Feedback Message -->
+                <div id="feedbackMessage" style="display: none; margin-top: 10px; font-weight: bold;"></div>
             </div>
 
             <div class="controls"> <!-- New Camera Selection Controls -->

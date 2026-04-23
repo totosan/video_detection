@@ -10,4 +10,6 @@ dependencies = [
     "lap>=0.5.12",
     "ultralytics>=8.3.127",
     "numpy==1.23.5",
+    "opencv-python-headless>=4.5.0",
+    "pyzmq>=25.0.0",
 ]

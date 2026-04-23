@@ -19,15 +19,19 @@ namespace Frontend
     /// </summary>
     public class Tools
     {
-        private readonly HttpClient client = new HttpClient();
-        private const string FlaskApiBaseUrl = "http://localhost:3000/api";
-        private const string FlaskAppBaseUrl = "http://localhost:3000"; // For snapshot endpoints
+        private readonly HttpClient client;
+        private const string FlaskApiBaseUrl = "http://localhost:8082/api";
+        private const string FlaskAppBaseUrl = "http://localhost:8082"; // For snapshot endpoints
 
         private readonly IChatCompletionService _chatCompletionService;
 
         public Tools(IChatCompletionService completionService)
         {
             _chatCompletionService = completionService;
+            
+            // Initialize HttpClient with User-Agent header
+            client = new HttpClient();
+            client.DefaultRequestHeaders.Add("User-Agent", "AI-Vision-Assistant/1.0");
         }
 
         private async Task<string> GetApiResponseAsync(string url)
@@ -69,13 +73,33 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"Requests the current objects, that one can see in a scene. Returns JSON: {""detections"": [...]} or {""error"": ""...""}")]
+        [KernelFunction, Description(@"Gets all detected objects currently visible in the video frame. Returns a list of objects with their labels (e.g., 'person', 'chair', 'cup') and track IDs (integers). Each detection has: label (object type), track_id (unique integer ID), box (coordinates), and color. Use this to answer questions like 'what objects are there?' or 'what IDs exist?'. Always parse and summarize the results for the user - list each object type and its track_id clearly.")]
         public async Task<string> GetCurrentDetectionsAsync()
         {
-            string url = $"{FlaskApiBaseUrl}/current_detections_light";
+            // Use the unfiltered endpoint so we can see ALL objects even when a track ID filter is active
+            string url = $"{FlaskApiBaseUrl}/current_detections_unfiltered";
             try
             {
                 var result = await GetApiResponseAsync(url); // app.py returns {"detections": [...]} or {"error": "..."}
+                
+                // Parse and format for better LLM understanding
+                var jsonDoc = JsonDocument.Parse(result);
+                if (jsonDoc.RootElement.TryGetProperty("detections", out JsonElement detectionsElement))
+                {
+                    var detections = new List<string>();
+                    foreach (var detection in detectionsElement.EnumerateArray())
+                    {
+                        var label = detection.GetProperty("label").GetString();
+                        var trackId = detection.GetProperty("track_id").GetInt32();
+                        detections.Add($"{label} (ID: {trackId})");
+                    }
+                    
+                    return JsonSerializer.Serialize(new { 
+                        summary = $"Found {detections.Count} objects",
+                        objects = detections,
+                        raw_data = result 
+                    });
+                }
                 return result;
             }
             catch (HttpRequestException e)
@@ -107,20 +131,59 @@ namespace Frontend
             }
         }
 
-        [KernelFunction, Description(@"With this function you can get the whole picture of the scene. Furthermore it enables rich and detailed analysis of the image.")]
-        public async Task<string> GetRawSnapshotAsync()
+        [KernelFunction, Description(@"Describes the image from the video camera. Use this tool when the user asks 'What can you see?' or 'describe, what you see'. It provides a detailed analysis of the image, including objects and their positions.")]
+        public async Task<string> GetTheImage()
         {
             Console.WriteLine("Getting current snapshot");
-            string url = $"{FlaskAppBaseUrl}/backend_snapshot"; // Uses the app base URL
+            string snapshotUrl = $"{FlaskAppBaseUrl}/snapshot"; // Uses the app base URL
+            string detectionsUrl = $"{FlaskApiBaseUrl}/current_detections_unfiltered"; // Get ALL detection metadata (unfiltered)
+            
             try
             {
-                HttpResponseMessage response = await client.GetAsync(url);
-                response.EnsureSuccessStatusCode();
-                byte[] imageBytes = await response.Content.ReadAsByteArrayAsync();
+                // Fetch both the image and the detection metadata in parallel
+                var snapshotTask = client.GetAsync(snapshotUrl);
+                var detectionsTask = client.GetAsync(detectionsUrl);
+                
+                await Task.WhenAll(snapshotTask, detectionsTask);
+                
+                var snapshotResponse = await snapshotTask;
+                var detectionsResponse = await detectionsTask;
+                
+                Console.WriteLine($"Requesting snapshot from: {snapshotUrl}");
+                Console.WriteLine($"Response status: {snapshotResponse.StatusCode}");
+                
+                if (!snapshotResponse.IsSuccessStatusCode)
+                {
+                    string errorContent = await snapshotResponse.Content.ReadAsStringAsync();
+                    Console.WriteLine($"Error response: {errorContent}");
+                    return JsonSerializer.Serialize(new { 
+                        status = "error", 
+                        message = $"Failed to get snapshot. Status: {snapshotResponse.StatusCode}, Details: {errorContent}" 
+                    });
+                }
+                
+                snapshotResponse.EnsureSuccessStatusCode();
+                byte[] imageBytes = await snapshotResponse.Content.ReadAsByteArrayAsync();
+                Console.WriteLine($"Received {imageBytes.Length} bytes");
+                
+                // Get detection data
+                string detectionsJson = "{}";
+                if (detectionsResponse.IsSuccessStatusCode)
+                {
+                    detectionsJson = await detectionsResponse.Content.ReadAsStringAsync();
+                    Console.WriteLine($"Retrieved detection metadata: {detectionsJson.Length} characters");
+                }
+                else
+                {
+                    Console.WriteLine($"Warning: Failed to get detections (status: {detectionsResponse.StatusCode})");
+                }
+                
                 using var image = Image.Load(imageBytes);
                 int width = image.Width;
                 int height = image.Height;
-                double scale = 0.25; // reduce size
+                Console.WriteLine($"Image size: {width}x{height}");
+                
+                double scale = 0.75; // reduce size
                 int newWidth = (int)(width * scale);
                 int newHeight = (int)(height * scale); 
 
@@ -136,25 +199,38 @@ namespace Frontend
                 var fileName = $"snapshot_{DateTime.UtcNow:yyyyMMdd_HHmmss}.jpg";
                 var filePath = Path.Combine(outputDir, fileName);
                 await File.WriteAllBytesAsync(filePath, msResized.ToArray());
+                Console.WriteLine($"Saved snapshot to: {filePath}");
 
-                // build the cahtcompletionmessage for a vision model
+                // build the chatcompletionmessage for a vision model
                 var userMessage = new ChatMessageContentItemCollection
                 {
-                  new TextContent("""
-                  Task: as a vision model, please describe the image. pin point the main objects in the image and their position.
+                  new TextContent($"""
+                  You are analyzing an annotated image from an object detection system. The image has bounding boxes drawn on it.
                   
-                  Rules:
-                  - Provide a detailed description of the image.
-                  - Include information about the objects, their positions, and any relevant context.
-                  - Use clear and concise language.
-                  - keep it simple
+                  GROUND TRUTH DETECTION DATA:
+                  {detectionsJson}
                   
-                  Format:
-                    - Use JSON format for the response.
-                    - Include the following keys in the JSON response:
-                        - objects: List of objects detected in the image.
-                           - object[0]: { "name": "object_name", "position": <Descripttion in prosa> }
-
+                  INSTRUCTIONS:
+                  1. Use the detection data above as the PRIMARY source of truth for object identification
+                  2. Each detection includes: label (object type), track_id (unique ID), bbox (bounding box coordinates), and confidence
+                  3. Describe the scene based on these ACTUAL detections, supplemented by visual context from the image
+                  4. Report the EXACT track_ids from the detection data - do NOT make up IDs
+                  
+                  Provide a JSON response with:
+                  1. "description": Brief scene summary (1 sentence)
+                  2. "objects": Array of detected objects from the detection data
+                  
+                  For each object provide:
+                  - "label": Object type from detection data
+                  - "track_id": The exact track_id from the detection data
+                  - "position_description": Spatial location based on bbox coordinates:
+                    * Horizontal: "left" (<33%), "center" (33-66%), "right" (>66%)
+                    * Vertical: "top" (<33%), "middle" (33-66%), "bottom" (>66%)
+                    * Depth: Estimate from size/overlap: "foreground", "midground", "background"
+                  - "confidence": Confidence score from detection data
+                  - "notable_features": Visual characteristics you can see (optional)
+                  
+                  CRITICAL: Use ONLY the track_ids and labels from the detection data provided above.
                   """),
                     new ImageContent(new ReadOnlyMemory<byte>(Convert.FromBase64String(base64Image)), "image/jpeg")
                 };
@@ -162,14 +238,23 @@ namespace Frontend
                 chat.AddUserMessage(userMessage);
                 var result = await _chatCompletionService.GetChatMessageContentAsync(chat);
 
-                return result.Content;
+                if (result?.Content is string content)
+                {
+                    return content;
+                }
+
+                return JsonSerializer.Serialize(new { status = "error", message = "Failed to get a description from the vision model." });
             }
             catch (HttpRequestException e)
             {
+                Console.WriteLine($"HTTP request error: {e.Message}");
+                Console.WriteLine($"Stack trace: {e.StackTrace}");
                 return JsonSerializer.Serialize(new { status = "error", message = $"API request failed: {e.Message}" });
             }
             catch (Exception e)
             {
+                Console.WriteLine($"Unexpected error: {e.Message}");
+                Console.WriteLine($"Stack trace: {e.StackTrace}");
                 return JsonSerializer.Serialize(new { status = "error", message = $"Unexpected error: {e.Message}" });
             }
         }
@@ -199,6 +284,7 @@ namespace Frontend
             }
         }
 
+
         [KernelFunction, Description(@" Getting the active object filter from the backend server. Returns JSON: {""filter"": {...}} or {""error"": ""...""}")]
         public async Task<string> GetObjectFilterAsync()
         {
@@ -206,6 +292,76 @@ namespace Frontend
             try
             {
                 return await GetApiResponseAsync(url); // app.py returns the current filter
+            }
+            catch (HttpRequestException e)
+            {
+                return JsonSerializer.Serialize(new { error = $"API request failed: {e.Message}" });
+            }
+            catch (Exception e)
+            {
+                return JsonSerializer.Serialize(new { error = $"Unexpected error: {e.Message}" });
+            }
+        }
+
+        [KernelFunction, Description(@"Track a specific object by its track ID. Use this when you have identified a specific object (by matching vision analysis with current detections) and want to follow only that object. The track_id must be obtained from GetCurrentDetectionsAsync. Setting this filter will clear any active label filter (filters are mutually exclusive). Returns JSON: {""message"": ""..."", ""track_id_filter"": <id>} or {""error"": ""...""}")]
+        public async Task<string> SetTrackIdFilterAsync(int trackId)
+        {
+            string url = $"{FlaskApiBaseUrl}/set_track_id_filter";
+            try
+            {
+                var payload = new { track_id = trackId };
+                var content = new StringContent(
+                    JsonSerializer.Serialize(payload),
+                    System.Text.Encoding.UTF8,
+                    "application/json");
+                
+                string response = await PostApiResponseAsync(url, content);
+                return response; // Backend returns {"message": "...", "track_id_filter": trackId}
+            }
+            catch (HttpRequestException e)
+            {
+                return JsonSerializer.Serialize(new { error = $"API request failed: {e.Message}" });
+            }
+            catch (Exception e)
+            {
+                return JsonSerializer.Serialize(new { error = $"Unexpected error: {e.Message}" });
+            }
+        }
+
+        [KernelFunction, Description(@"Get the currently active track ID filter. Returns the track_id of the object being tracked, or null if no track ID filter is active. Use this when the user asks 'what are you tracking?' or 'what object is being followed?'. Returns JSON: {""track_id_filter"": <id>} or {""track_id_filter"": null} or {""error"": ""...""}")]
+        public async Task<string> GetTrackIdFilterAsync()
+        {
+            string url = $"{FlaskApiBaseUrl}/get_track_id_filter";
+            try
+            {
+                string response = await GetApiResponseAsync(url);
+                return response; // Backend returns {"track_id_filter": <id or null>}
+            }
+            catch (HttpRequestException e)
+            {
+                return JsonSerializer.Serialize(new { error = $"API request failed: {e.Message}" });
+            }
+            catch (Exception e)
+            {
+                return JsonSerializer.Serialize(new { error = $"Unexpected error: {e.Message}" });
+            }
+        }
+
+        [KernelFunction, Description(@"Clear all active filters (both object label filters and track ID filters). Use this when the user wants to see all objects again, reset the filtering state, or says 'show me everything' or 'clear filter'. Returns JSON: {""message"": ""..."", ""object_filter"": []} or {""error"": ""...""}")]
+        public async Task<string> ClearFiltersAsync()
+        {
+            string url = $"{FlaskApiBaseUrl}/set_object_filter";
+            try
+            {
+                // Clearing by setting object_filter to empty array also clears track_id filter
+                var payload = new { object_filter = new string[] { } };
+                var content = new StringContent(
+                    JsonSerializer.Serialize(payload),
+                    System.Text.Encoding.UTF8,
+                    "application/json");
+                
+                string response = await PostApiResponseAsync(url, content);
+                return response; // Backend returns {"message": "...", "object_filter": []}
             }
             catch (HttpRequestException e)
             {

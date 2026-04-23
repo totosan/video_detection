@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  video-detection-intel:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.intel
+      platforms:
+        - linux/amd64
+    image: video-detection:intel-latest
+    container_name: video-detection-intel
+    restart: unless-stopped
+    ports:
+      - "8082:8082"    # Flask web interface
+      - "5555:5555"    # ZeroMQ image input
+      - "5556:5556"    # ZeroMQ results output
+    environment:
+      - FLASK_RUN_HOST=0.0.0.0
+      - FLASK_RUN_PORT=8082
+      - DETECTION_IMAGE_ENDPOINT=tcp://*:5555
+      - DETECTION_RESULTS_ENDPOINT=tcp://*:5556
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+      - OPENBLAS_NUM_THREADS=4
+    volumes:
+      - ./Snapshots:/video_detection/Snapshots
+      - ./static:/video_detection/static
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  video-detection-intel-optimized:
+    build:
+      context: ..
+      dockerfile: Docker/Dockerfile.intel-optimized
+      platforms:
+        - linux/amd64
+    image: video-detection:intel-optimized-latest
+    container_name: video-detection-intel-optimized
+    restart: unless-stopped
+    ports:
+      - "8083:8082"    # Flask web interface (different port to avoid conflict)
+      - "5557:5555"    # ZeroMQ image input
+      - "5558:5556"    # ZeroMQ results output
+    environment:
+      - FLASK_RUN_HOST=0.0.0.0
+      - FLASK_RUN_PORT=8082
+      - DETECTION_IMAGE_ENDPOINT=tcp://*:5555
+      - DETECTION_RESULTS_ENDPOINT=tcp://*:5556
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+      - OPENBLAS_NUM_THREADS=4
+      - NUMEXPR_MAX_THREADS=4
+    volumes:
+      - ./Snapshots:/video_detection/Snapshots
+      - ./static:/video_detection/static
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+    profiles:
+      - optimized

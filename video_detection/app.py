@@ -14,6 +14,8 @@ import signal
 import io # Added for image byte handling
 import zmq # <--- ADDED IMPORT
 import json # <--- ADDED IMPORT (was missing in previous thought, but present in my last code generation for app.py)
+import socket # For hostname
+from datetime import datetime # For timestamp
 
 # Import static config and the new system manager
 from config import STATIC_FOLDER, TEMPLATE_FOLDER, RTSP_STREAM_URL # Only import static config
@@ -26,6 +28,144 @@ os.makedirs(STATIC_FOLDER, exist_ok=True)
 
 # Get logger
 logger = logging.getLogger(__name__) # Use module name for logger
+
+# Create a separate logger for request logging
+request_logger = logging.getLogger('flask_requests')
+request_logger.setLevel(logging.DEBUG)
+
+# Add file handler for request logs if not already present
+if not request_logger.handlers:
+    # Create logs directory if it doesn't exist
+    log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Add file handler for request logs
+    request_log_file = os.path.join(log_dir, 'requests.log')
+    file_handler = logging.FileHandler(request_log_file)
+    file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    request_logger.addHandler(file_handler)
+    
+    # Also add console handler for immediate visibility
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)  # Only show warnings and errors on console
+    console_handler.setFormatter(formatter)
+    request_logger.addHandler(console_handler)
+
+# Add request logging middleware
+@app.before_request
+def log_request_info():
+    """Log all incoming requests"""
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    user_agent = request.headers.get('User-Agent', 'Unknown')
+    content_type = request.headers.get('Content-Type', 'None')
+    
+    # Log the basic request info
+    request_logger.debug(f"Request: {request.method} {request.url} from {client_ip} - User-Agent: {user_agent}")
+    
+    # Log suspicious patterns
+    if user_agent == 'Unknown' or not user_agent:
+        request_logger.warning(f"SUSPICIOUS: No User-Agent header from {client_ip} to {request.url}")
+    
+    # Log potential bot traffic
+    bot_indicators = ['bot', 'crawler', 'spider', 'scraper']
+    if any(indicator.lower() in user_agent.lower() for indicator in bot_indicators):
+        request_logger.info(f"BOT DETECTED: {user_agent} from {client_ip} to {request.url}")
+    
+    # Log multipart requests (image uploads)
+    if 'multipart/form-data' in content_type:
+        request_logger.info(f"FILE UPLOAD: {request.method} {request.url} from {client_ip} - Content-Type: {content_type}")
+
+@app.after_request
+def log_response_info(response):
+    """Log all responses, especially rejected ones"""
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    
+    # Log rejected requests (4xx and 5xx status codes)
+    if response.status_code >= 400:
+        request_logger.warning(f"REJECTED: {request.method} {request.url} from {client_ip} - Status: {response.status_code} - Content-Length: {response.content_length}")
+        
+        # For specific error types, add more detailed logging
+        if response.status_code == 400:
+            request_logger.warning(f"BAD REQUEST: {request.method} {request.url} - Likely missing or invalid parameters")
+        elif response.status_code == 404:
+            request_logger.warning(f"NOT FOUND: {request.method} {request.url} - Endpoint does not exist")
+        elif response.status_code >= 500:
+            request_logger.error(f"SERVER ERROR: {request.method} {request.url} - Status: {response.status_code}")
+    else:
+        # Log successful requests at debug level
+        request_logger.debug(f"SUCCESS: {request.method} {request.url} from {client_ip} - Status: {response.status_code}")
+    
+    return response
+
+# Error handler for 404 (Not Found)
+@app.errorhandler(404)
+def not_found_error(error):
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    request_logger.warning(f"404 NOT FOUND: {request.method} {request.url} from {client_ip} - Endpoint does not exist")
+    return jsonify({"error": "Endpoint not found", "status": 404}), 404
+
+# Error handler for 405 (Method Not Allowed)
+@app.errorhandler(405)
+def method_not_allowed_error(error):
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    request_logger.warning(f"405 METHOD NOT ALLOWED: {request.method} {request.url} from {client_ip} - Method not supported for this endpoint")
+    return jsonify({"error": "Method not allowed", "status": 405, "allowed_methods": error.description}), 405
+
+# Error handler for 500 (Internal Server Error)
+@app.errorhandler(500)
+def internal_server_error(error):
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    request_logger.error(f"500 INTERNAL SERVER ERROR: {request.method} {request.url} from {client_ip} - {str(error)}")
+    return jsonify({"error": "Internal server error", "status": 500}), 500
+
+# Simple rate limiting storage (in production, use Redis or similar)
+request_counts = {}
+REQUEST_LIMIT = 100  # requests per minute per IP
+TIME_WINDOW = 60  # seconds
+
+def rate_limit_check(client_ip):
+    """Check if client has exceeded rate limit"""
+    current_time = time.time()
+    
+    # Clean old entries
+    for ip in list(request_counts.keys()):
+        request_counts[ip] = [(req_time, count) for req_time, count in request_counts.get(ip, []) 
+                             if current_time - req_time < TIME_WINDOW]
+        if not request_counts[ip]:
+            del request_counts[ip]
+    
+    # Count requests for this IP in the time window
+    ip_requests = request_counts.get(client_ip, [])
+    total_requests = sum(count for _, count in ip_requests)
+    
+    if total_requests >= REQUEST_LIMIT:
+        return False
+    
+    # Add this request
+    if client_ip not in request_counts:
+        request_counts[client_ip] = []
+    request_counts[client_ip].append((current_time, 1))
+    
+    return True
+
+def rate_limited_endpoint(f):
+    """Decorator to add rate limiting to endpoints"""
+    def wrapper(*args, **kwargs):
+        client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+        
+        if not rate_limit_check(client_ip):
+            request_logger.warning(f"RATE LIMITED: {request.method} {request.url} from {client_ip} - Exceeded {REQUEST_LIMIT} requests per minute")
+            return jsonify({
+                "error": "Rate limit exceeded", 
+                "message": f"Maximum {REQUEST_LIMIT} requests per minute allowed",
+                "status": 429
+            }), 429
+        
+        return f(*args, **kwargs)
+    wrapper.__name__ = f.__name__
+    return wrapper
 
 # Ensure all loggers respect the global logging level
 for logger_name in logging.root.manager.loggerDict:
@@ -192,7 +332,7 @@ def generate_frames(lock, frame_source_func):
             # If getters handle locking, this lock might be redundant.
             # For now, assume getters are thread-safe and don't require external lock here.
             # with lock: # Re-evaluate if this lock is needed based on getter implementation
-            ret, buffer = cv2.imencode('.jpg', frame)
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 98])
             if not ret:
                 logger.warning("Could not encode frame to JPEG") # Use warning
                 continue
@@ -246,7 +386,7 @@ def api_tracked_objects():
         if 'detection_image' in info and info['detection_image'] is not None:
             logger.debug(f"Track ID {track_id}: Found detection image in tracked_info, encoding to base64")
             try:
-                ret, buffer = cv2.imencode('.jpg', info['detection_image'])
+                ret, buffer = cv2.imencode('.jpg', info['detection_image'], [cv2.IMWRITE_JPEG_QUALITY, 98])
                 if ret:
                     object_data['detection_image'] = base64.b64encode(buffer).decode('utf-8')
                 else:
@@ -306,52 +446,130 @@ def set_selected_videosource():
 # --- New API Endpoint for Current Detections ---
 @app.route('/api/current_detections_light')
 def api_current_detections_light():
-    """API endpoint to get the latest raw detection results for client-side drawing."""
+    """API endpoint to get the latest raw detection results for client-side drawing.
+       This version is 'light' because it does not attempt to add cropped images.
+       It directly returns the serializable detections from the detection system.
+       Filtering is applied here based on the currently set filters.
+    """
     try:
-        data = detection_system.get_current_detections_data()
-        # Ensure detections is always a list, even if None initially
-        if data.get('detections') is None:
-            data['detections'] = []
+        data_from_system = detection_system.get_current_detections_data()
+        
+        detections_for_api = data_from_system.get('detections', [])
+        frame_shape_for_api = data_from_system.get('frame_shape', None)
 
-        return jsonify(data['detections'])  # Now contains JSON-serializable data and detection images
+        # --- Apply Filters ---
+        track_id_filter = detection_system.get_track_id_filter()
+        label_filter = detection_system.get_label_filter()
+
+        if track_id_filter is not None:
+            detections_for_api = [d for d in detections_for_api if d.get('track_id') == track_id_filter]
+            logger.debug(f"api_current_detections_light: Applied track_id filter: {track_id_filter}, {len(detections_for_api)} detections remain")
+        
+        if label_filter: # If the list is not empty
+            detections_for_api = [d for d in detections_for_api if d.get('label') in label_filter]
+            logger.debug(f"api_current_detections_light: Applied label filter: {label_filter}, {len(detections_for_api)} detections remain")
+        # --- End of Filters ---
+
+        response_data = {
+            'detections': detections_for_api,
+            'frame_shape': frame_shape_for_api
+        }
+        
+        return jsonify(response_data)
     except Exception as e:
-        logger.exception("API: Error getting or serializing current detections data")
-        return jsonify({"error": "Failed to get current detections data"}), 500
+        logger.exception("API: Error getting or serializing current_detections_light data")
+        return jsonify({"error": "Failed to get current detections data", "detections": [], "frame_shape": None}), 500
+
+@app.route('/api/current_detections_unfiltered')
+def api_current_detections_unfiltered():
+    """API endpoint to get ALL current detections WITHOUT applying any filters.
+       This is intended for AI assistants and tools that need to see all objects
+       in the scene, even when a track ID or label filter is active for rendering.
+       This prevents the situation where setting a filter makes it impossible to
+       see what other objects are available to track.
+    """
+    try:
+        data_from_system = detection_system.get_current_detections_data()
+        
+        # Return detections WITHOUT applying any filters
+        detections_for_api = data_from_system.get('detections', [])
+        frame_shape_for_api = data_from_system.get('frame_shape', None)
+
+        response_data = {
+            'detections': detections_for_api,
+            'frame_shape': frame_shape_for_api
+        }
+        
+        logger.debug(f"api_current_detections_unfiltered: Returning {len(detections_for_api)} unfiltered detections")
+        return jsonify(response_data)
+    except Exception as e:
+        logger.exception("API: Error getting or serializing unfiltered current detections data")
+        return jsonify({"error": "Failed to get current detections data", "detections": [], "frame_shape": None}), 500
 
 @app.route('/api/current_detections')
 def api_current_detections():
-    """API endpoint to get the latest raw detection results for client-side drawing."""
+    """API endpoint to get the latest raw detection results for client-side drawing,
+       including cropped images for each detection.
+       Filtering is applied here based on the currently set filters.
+    """
     try:
-        data = detection_system.get_current_detections_data()
-        # Ensure detections is always a list, even if None initially
-        if data.get('detections') is None:
-            data['detections'] = []
+        data_from_system = detection_system.get_current_detections_data()
+        
+        detections_for_api = data_from_system.get('detections', [])
+        frame_shape_for_api = data_from_system.get('frame_shape', None)
+
+        # --- Apply Filters ---
+        track_id_filter = detection_system.get_track_id_filter()
+        label_filter = detection_system.get_label_filter()
+
+      #  if track_id_filter is not None:
+      #      detections_for_api = [d for d in detections_for_api if d.get('track_id') == track_id_filter]
+#
+      #  if label_filter: # If the list is not empty
+      #      detections_for_api = [d for d in detections_for_api if d.get('label') in label_filter]
+        # --- End of Filters ---
 
         # Add detection images (cropped regions) for each detection
-        detection_image = detection_system.get_latest_frame()
-        if detection_image is not None:
-            for detection in data['detections']:
+        latest_frame_for_cropping = detection_system.get_latest_frame()
+
+        if latest_frame_for_cropping is not None:
+            for detection in detections_for_api: # Iterate over the list of detection dicts
                 try:
                     box = detection.get('box')  # [x_min, y_min, x_max, y_max]
                     if box and len(box) == 4:
                         x_min, y_min, x_max, y_max = map(int, box)
-                        cropped_image = detection_image[y_min:y_max, x_min:x_max]
-                        ret, buffer = cv2.imencode('.jpg', cropped_image)
-                        if ret:
-                            detection['image'] = base64.b64encode(buffer).decode('utf-8')
+                        # Ensure coordinates are valid before cropping
+                        h, w = latest_frame_for_cropping.shape[:2]
+                        x_min, y_min = max(0, x_min), max(0, y_min)
+                        x_max, y_max = min(w, x_max), min(h, y_max)
+                        
+                        if x_max > x_min and y_max > y_min:
+                            cropped_image = latest_frame_for_cropping[y_min:y_max, x_min:x_max]
+                            if cropped_image.size > 0: # Check if cropped image is not empty
+                                ret, buffer = cv2.imencode('.jpg', cropped_image, [cv2.IMWRITE_JPEG_QUALITY, 98])
+                                if ret:
+                                    detection['image'] = base64.b64encode(buffer).decode('utf-8')
+                                else:
+                                    logger.warning("current_detections: Could not encode cropped detection image to JPEG")
+                            else:
+                                logger.warning(f"current_detections: Cropped image is empty for box {box}")
                         else:
-                            logger.warning("current_detections: Could not encode cropped detection image to JPEG")
+                             logger.warning(f"current_detections: Invalid box coordinates for cropping: {box}")
                     else:
-                        logger.warning("current_detections: Invalid bounding box format")
+                        logger.warning("current_detections: Invalid bounding box format for image cropping")
                 except Exception as e:
                     logger.exception("current_detections: Error processing detection image")
         else:
             logger.warning("current_detections: No latest frame available for cropping detection images")
 
-        return jsonify(data)  # Now contains JSON-serializable data and detection images
+        response_data = {
+            'detections': detections_for_api,
+            'frame_shape': frame_shape_for_api
+        }
+        return jsonify(response_data)
     except Exception as e:
-        logger.exception("API: Error getting or serializing current detections data")
-        return jsonify({"error": "Failed to get current detections data"}), 500
+        logger.exception("API: Error getting or serializing current_detections data with images")
+        return jsonify({"error": "Failed to get current detections data with images", "detections": [], "frame_shape": None}), 500
 # ---------------------------------------------
 
 # --- API Endpoints for Backend Annotation Control ---
@@ -428,7 +646,7 @@ def api_track_history():
                          detection_image = detection_system.get_detection_image(track_id)
                          if detection_image is not None:
                              # Convert the image to JPEG bytes
-                             ret, buffer = cv2.imencode('.jpg', detection_image)
+                             ret, buffer = cv2.imencode('.jpg', detection_image, [cv2.IMWRITE_JPEG_QUALITY, 98])
                              if ret:
                                  # Convert to base64 for JSON
                                  jpg_as_text = base64.b64encode(buffer).decode('utf-8')
@@ -451,25 +669,36 @@ def api_track_history():
 
 @app.route('/snapshot')
 def snapshot():
-    """Returns a single JPEG snapshot from the latest captured frame."""
-    # Ensure detection system is running (optional check)
+    """Returns a single JPEG snapshot, preferring the annotated frame, then raw frame."""
     if not detection_system.is_running():
         logger.warning("snapshot: Detection system not running.")
-        # Optionally try restarting it, or just return error
-        # detection_system.start() # Be careful with restarting logic
         return ("Detection system not running", 503)
 
-    logger.debug("Snapshot: Retrieving from detection_system.")
-    frame = detection_system.get_latest_frame()
+    logger.debug("Snapshot: Retrieving frame from detection_system.")
+    frame_to_send = None
+    
+    # Try to get the annotated frame first
+    annotated_frame = detection_system.get_latest_annotated_frame()
+    if annotated_frame is not None:
+        logger.debug("Snapshot: Using latest annotated frame.")
+        frame_to_send = annotated_frame
+    else:
+        logger.debug("Snapshot: Annotated frame not available, trying latest raw frame.")
+        raw_frame = detection_system.get_latest_frame()
+        if raw_frame is not None:
+            logger.debug("Snapshot: Using latest raw frame.")
+            frame_to_send = raw_frame
 
-    if frame is None:
-        logger.info("Snapshot: No frame available.") # Use info
+    if frame_to_send is None:
+        logger.info("Snapshot: No frame available (neither annotated nor raw).")
         return ("No frame available", 503)
 
-    ret, buffer = cv2.imencode('.jpg', frame)
+    ret, buffer = cv2.imencode('.jpg', frame_to_send, [cv2.IMWRITE_JPEG_QUALITY, 98])
     if not ret:
-        logger.error("Snapshot: Error encoding frame.") # Use error
+        logger.error("Snapshot: Error encoding frame.")
         return ("Error encoding frame", 500)
+    
+    logger.debug("Snapshot: Returning JPEG image.")
     return Response(buffer.tobytes(), mimetype='image/jpeg')
 
 @app.route('/raw_snapshot')
@@ -513,47 +742,13 @@ def raw_snapshot():
         logger.error(f"Raw snapshot: Failed to grab frame from {source_to_open}.")
         return ("Failed to grab frame", 503)
     
-    ret2, buf = cv2.imencode('.jpg', frame)
+    ret2, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 98])
     if not ret2:
         logger.error(f"Raw snapshot: Error encoding frame from {source_to_open}.")
         return ("Error encoding frame", 500)
     
     logger.debug(f"Raw snapshot: Returning JPEG image from {source_to_open}.")
     return Response(buf.tobytes(), mimetype='image/jpeg')
-
-@app.route('/backend_snapshot')
-def backend_snapshot():
-    """Returns a single JPEG snapshot, preferring the annotated frame, then raw frame."""
-    if not detection_system.is_running():
-        logger.warning("backend_snapshot: Detection system not running.")
-        return ("Detection system not running", 503)
-
-    logger.debug("Backend snapshot: Retrieving frame from detection_system.")
-    frame_to_send = None
-    
-    # Try to get the annotated frame first
-    annotated_frame = detection_system.get_latest_annotated_frame()
-    if annotated_frame is not None:
-        logger.debug("Backend snapshot: Using latest annotated frame.")
-        frame_to_send = annotated_frame
-    else:
-        logger.debug("Backend snapshot: Annotated frame not available, trying latest raw frame.")
-        raw_frame = detection_system.get_latest_frame()
-        if raw_frame is not None:
-            logger.debug("Backend snapshot: Using latest raw frame.")
-            frame_to_send = raw_frame
-
-    if frame_to_send is None:
-        logger.info("Backend snapshot: No frame available (neither annotated nor raw).")
-        return ("No frame available", 503)
-
-    ret, buffer = cv2.imencode('.jpg', frame_to_send)
-    if not ret:
-        logger.error("Backend snapshot: Error encoding frame.")
-        return ("Error encoding frame", 500)
-    
-    logger.debug("Backend snapshot: Returning JPEG image.")
-    return Response(buffer.tobytes(), mimetype='image/jpeg')
 
 # Add API endpoints in app.py
 @app.route('/api/toggle_tracking', methods=['POST'])
@@ -576,30 +771,150 @@ def tracking_status():
         logger.exception("API: Error getting tracking status")
         return jsonify({"error": "Failed to get tracking status"}), 500
 
+# --- YOLO Object Tracking Control ---
+@app.route('/api/yolo_tracking/toggle', methods=['POST'])
+def toggle_yolo_tracking():
+    """API to toggle YOLO object tracking on/off."""
+    try:
+        new_status = detection_system.toggle_tracking()
+        return jsonify({"yolo_tracking_enabled": new_status}), 200
+    except Exception as e:
+        logger.exception("API: Error toggling YOLO tracking")
+        return jsonify({"error": "Failed to toggle YOLO tracking"}), 500
+
+@app.route('/api/yolo_tracking/enable', methods=['POST'])
+def enable_yolo_tracking():
+    """API to enable YOLO object tracking."""
+    try:
+        detection_system.enable_tracking()
+        return jsonify({"yolo_tracking_enabled": True}), 200
+    except Exception as e:
+        logger.exception("API: Error enabling YOLO tracking")
+        return jsonify({"error": "Failed to enable YOLO tracking"}), 500
+
+@app.route('/api/yolo_tracking/disable', methods=['POST'])
+def disable_yolo_tracking():
+    """API to disable YOLO object tracking."""
+    try:
+        detection_system.disable_tracking()
+        return jsonify({"yolo_tracking_enabled": False}), 200
+    except Exception as e:
+        logger.exception("API: Error disabling YOLO tracking")
+        return jsonify({"error": "Failed to disable YOLO tracking"}), 500
+
+@app.route('/api/yolo_tracking/status', methods=['GET'])
+def get_yolo_tracking_status():
+    """API to get the current status of YOLO object tracking."""
+    try:
+        status = detection_system.is_tracking_enabled()
+        return jsonify({"yolo_tracking_enabled": status}), 200
+    except Exception as e:
+        logger.exception("API: Error getting YOLO tracking status")
+        return jsonify({"error": "Failed to get YOLO tracking status"}), 500
+# -------------------------------------
+
+# --- Tracking Rendering Control ---
+@app.route('/api/render_tracking/toggle', methods=['POST'])
+def toggle_render_tracking():
+    """API to toggle rendering of tracking visualizations (track lines, IDs)."""
+    try:
+        new_status = detection_system.toggle_render_tracking()
+        return jsonify({"render_tracking_enabled": new_status}), 200
+    except Exception as e:
+        logger.exception("API: Error toggling render tracking")
+        return jsonify({"error": "Failed to toggle render tracking"}), 500
+
+@app.route('/api/render_tracking/enable', methods=['POST'])
+def enable_render_tracking():
+    """API to enable rendering of tracking visualizations."""
+    try:
+        detection_system.enable_render_tracking()
+        return jsonify({"render_tracking_enabled": True}), 200
+    except Exception as e:
+        logger.exception("API: Error enabling render tracking")
+        return jsonify({"error": "Failed to enable render tracking"}), 500
+
+@app.route('/api/render_tracking/disable', methods=['POST'])
+def disable_render_tracking():
+    """API to disable rendering of tracking visualizations."""
+    try:
+        detection_system.disable_render_tracking()
+        return jsonify({"render_tracking_enabled": False}), 200
+    except Exception as e:
+        logger.exception("API: Error disabling render tracking")
+        return jsonify({"error": "Failed to disable render tracking"}), 500
+
+@app.route('/api/render_tracking/status', methods=['GET'])
+def get_render_tracking_status():
+    """API to get the current status of tracking rendering."""
+    try:
+        status = detection_system.is_render_tracking_enabled()
+        return jsonify({"render_tracking_enabled": status}), 200
+    except Exception as e:
+        logger.exception("API: Error getting render tracking status")
+        return jsonify({"error": "Failed to get render tracking status"}), 500
+# -------------------------------------
+
+@app.route('/api/set_track_id_filter', methods=['POST'])
+def set_track_id_filter():
+    """API endpoint to set the track ID filter."""
+    try:
+        data = request.get_json()
+        if not data or 'track_id' not in data:
+            logger.warning("API: Invalid request to set track ID filter. 'track_id' missing.")
+            return jsonify({"error": "Missing 'track_id' in request"}), 400
+
+        track_id = data['track_id']
+        detection_system.set_track_id_filter(track_id)
+        logger.info(f"API: Track ID filter set to {track_id}.")
+        return jsonify({"message": "Track ID filter set successfully", "track_id_filter": track_id}), 200
+    except Exception as e:
+        logger.exception("API: Error setting track ID filter")
+        return jsonify({"error": "Failed to set track ID filter", "details": str(e)}), 500
+
+@app.route('/api/get_track_id_filter', methods=['GET'])
+def get_track_id_filter():
+    """API endpoint to get the current track ID filter."""
+    try:
+        track_id_filter = detection_system.get_track_id_filter()
+        logger.info(f"API: Current Track ID filter: {track_id_filter}")
+        return jsonify({"track_id_filter": track_id_filter}), 200
+    except Exception as e:
+        logger.exception("API: Error retrieving track ID filter")
+        return jsonify({"error": "Failed to retrieve track ID filter", "details": str(e)}), 500
+
 @app.route('/api/set_object_filter', methods=['POST'])
 def set_object_filter():
-    """API to set the object filter for displaying specific labels."""
+    """API endpoint to set the object filter for displaying specific labels."""
     try:
-        print(f"Request data: {request.json}")  # Debugging line
+        # Expecting {'object_filter': ['person', 'car']} or {'object_filter': []}
         filter_data = request.json.get('object_filter', None)
+        
+        # detection_system.set_object_filter handles None and type checking
         detection_system.set_object_filter(filter_data)
-        return jsonify({"object_filter": filter_data})
+
+        status_message = f"Filter set to labels: {filter_data}" if filter_data else "Label filter cleared"
+        logger.info(f"API: {status_message}")
+        return jsonify({"message": status_message, "object_filter": filter_data}), 200
+
     except Exception as e:
         logger.exception("API: Error setting object filter")
-        return jsonify({"error": "Failed to set object filter"}), 500
+        return jsonify({"error": "Failed to set object filter", "details": str(e)}), 500
 
 @app.route('/api/get_object_filter', methods=['GET'])
 def get_object_filter():
-    """API to get the current object filter."""
+    """API endpoint to get the current object filter."""
     try:
-        current_filter = detection_system.get_object_filter()
-        return jsonify({"object_filter": current_filter})
+        current_filter = detection_system.get_label_filter()
+        logger.debug(f"API: Getting object filter: {current_filter}")
+        return jsonify({"object_filter": current_filter}), 200
     except Exception as e:
         logger.exception("API: Error getting object filter")
-        return jsonify({"error": "Failed to get object filter"}), 500
+        return jsonify({"error": "Failed to get object filter", "object_filter": []}), 500
 
 # --- API Endpoint for Single Image Detection ---
 @app.route('/api/detect', methods=['POST'])
+@rate_limited_endpoint
 def api_detect_objects():
     """
     API endpoint to detect objects in an uploaded image.
@@ -610,14 +925,27 @@ def api_detect_objects():
     Each object in the list is a dictionary, e.g.:
     {'box': [x_min, y_min, x_max, y_max], 'label': 'person', 'confidence': 0.9}
     """
+    client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+    
     if 'image' not in request.files:
-        logger.warning("API /api/detect: No image file in request.")
+        request_logger.warning(f"API /api/detect: No image file in request from {client_ip}")
         return jsonify({"error": "No image file provided"}), 400
 
     file = request.files['image']
     if file.filename == '':
-        logger.warning("API /api/detect: No selected file.")
+        request_logger.warning(f"API /api/detect: No selected file from {client_ip}")
         return jsonify({"error": "No selected file"}), 400
+    
+    # Log file details
+    file_size = len(file.read())
+    file.seek(0)  # Reset file pointer
+    request_logger.info(f"API /api/detect: Processing file '{file.filename}' ({file_size} bytes) from {client_ip}")
+    
+    # Check file size limits (e.g., 10MB)
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+    if file_size > MAX_FILE_SIZE:
+        request_logger.warning(f"API /api/detect: File too large ({file_size} bytes) from {client_ip}")
+        return jsonify({"error": f"File too large. Maximum size is {MAX_FILE_SIZE} bytes"}), 400
 
     try:
         # Read image file into a numpy array
@@ -639,7 +967,309 @@ def api_detect_objects():
     except Exception as e:
         logger.exception("API /api/detect: Error processing image")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/v1/vision/detection', methods=['POST'])
+@rate_limited_endpoint
+def api_vision_detection():
+    """
+    REST API endpoint for object detection in uploaded images.
+    
+    Request: POST /v1/vision/detection
+    Content-Type: multipart/form-data
+    
+    Required Parameters:
+    - image: The image file to analyze
+    
+    Optional Parameters:
+    - min_confidence: Minimum confidence threshold (float, default: 0.4, range: 0.0-1.0)
+    
+    Response: JSON following the specified schema with success, message, predictions array and metadata
+    """
+    start_time = time.time()
+    hostname = socket.gethostname()
+    timestamp_utc = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    
+    print("API /v1/vision/detection: Received request for object detection.") 
+    logger.info("API /v1/vision/detection: Received request for object detection.") 
+    
+    if 'image' not in request.files:
+        logger.warning("API /v1/vision/detection: No image file in request.")
+        return jsonify({
+            "success": False,
+            "message": "No image file provided",
+            "error": "No image file provided",
+            "predictions": [],
+            "inferenceMs": 0,
+            "processMs": int((time.time() - start_time) * 1000),
+            "moduleId": "ObjectDetectionYOLOv11",
+            "moduleName": "Object Detection (YOLOv11)",
+            "command": "detect",
+            "inferenceDevice": "CPU",
+            "analysisRoundTripMs": int((time.time() - start_time) * 1000),
+            "processedBy": hostname,
+            "timestampUTC": timestamp_utc
+        }), 400
+
+    file = request.files['image']
+    if file.filename == '':
+        logger.warning("API /v1/vision/detection: No selected file.")
+        return jsonify({
+            "success": False,
+            "message": "No selected file",
+            "error": "No selected file",
+            "predictions": [],
+            "inferenceMs": 0,
+            "processMs": int((time.time() - start_time) * 1000),
+            "moduleId": "ObjectDetectionYOLOv11",
+            "moduleName": "Object Detection (YOLOv11)",
+            "command": "detect",
+            "inferenceDevice": "CPU",
+            "analysisRoundTripMs": int((time.time() - start_time) * 1000),
+            "processedBy": hostname,
+            "timestampUTC": timestamp_utc
+        }), 400
+
+    # Get min_confidence parameter (default: 0.4)
+    min_confidence = float(request.form.get('min_confidence', 0.4))
+    min_confidence = max(0.0, min(1.0, min_confidence))  # Clamp to 0.0-1.0 range
+
+    try:
+        # Read image file into a numpy array
+        filestr = file.read()
+        npimg = np.frombuffer(filestr, np.uint8)
+        cv_image = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+
+        if cv_image is None:
+            logger.error("API /v1/vision/detection: Could not decode image.")
+            return jsonify({
+                "success": False,
+                "message": "Could not decode image",
+                "error": "Could not decode image",
+                "predictions": [],
+                "inferenceMs": 0,
+                "processMs": int((time.time() - start_time) * 1000),
+                "moduleId": "ObjectDetectionYOLOv11",
+                "moduleName": "Object Detection (YOLOv11)",
+                "command": "detect",
+                "inferenceDevice": "CPU",
+                "analysisRoundTripMs": int((time.time() - start_time) * 1000),
+                "processedBy": hostname,
+                "timestampUTC": timestamp_utc
+            }), 400
+
+        # Process the image using the detection system
+        inference_start = time.time()
+        detections, _ = detection_system.process_single_image(cv_image, min_confidence=min_confidence)
+        inference_time = int((time.time() - inference_start) * 1000)
+        
+        # Convert detections to the requested format
+        predictions = []
+        detected_labels = []
+        
+        for detection in detections:
+            confidence = detection.get("confidence", 0.0)
+            
+            # Apply confidence filtering
+            if confidence >= min_confidence:
+                label = detection.get("label", "unknown")
+                # Handle both box formats - try box first, then boundingBox
+                box = detection.get("box")
+                if box and len(box) >= 4:
+                    # Direct box format: [x_min, y_min, x_max, y_max]
+                    x_min, y_min, x_max, y_max = box[:4]
+                else:
+                    # BoundingBox format: {"x": x, "y": y, "width": w, "height": h}
+                    bbox = detection.get("boundingBox", {"x": 0, "y": 0, "width": 0, "height": 0})
+                    x_min = bbox.get("x", 0)
+                    y_min = bbox.get("y", 0)
+                    x_max = x_min + bbox.get("width", 0)
+                    y_max = y_min + bbox.get("height", 0)
+                
+                prediction = {
+                    "label": label,
+                    "confidence": round(confidence, 3),
+                    "x_min": int(x_min),
+                    "y_min": int(y_min),
+                    "x_max": int(x_max),
+                    "y_max": int(y_max)
+                }
+                predictions.append(prediction)
+                detected_labels.append(label)
+        
+        # Create human-readable message
+        if len(predictions) == 0:
+            message = "No objects detected"
+        elif len(predictions) == 1:
+            message = f"Found {detected_labels[0]}"
+        else:
+            unique_labels = list(set(detected_labels))
+            if len(unique_labels) <= 3:
+                message = f"Found {', '.join(unique_labels)}"
+            else:
+                message = f"Found {', '.join(unique_labels[:3])}..."
+        
+        process_time = int((time.time() - start_time) * 1000)
+        
+        logger.info(f"API /v1/vision/detection: Processed {file.filename}, found {len(predictions)} objects above confidence {min_confidence}.")
+        
+        return jsonify({
+            "success": True,
+            "message": message,
+            "predictions": predictions,
+            "inferenceMs": inference_time,
+            "processMs": process_time,
+            "moduleId": "ObjectDetectionYOLOv11",
+            "moduleName": "Object Detection (YOLOv11)",
+            "command": "detect",
+            "inferenceDevice": "CPU",
+            "analysisRoundTripMs": process_time,
+            "processedBy": hostname,
+            "timestampUTC": timestamp_utc
+        })
+
+    except Exception as e:
+        logger.exception("API /v1/vision/detection: Error processing image")
+        process_time = int((time.time() - start_time) * 1000)
+        return jsonify({
+            "success": False,
+            "message": f"Processing error: {str(e)}",
+            "error": f"Processing error: {str(e)}",
+            "predictions": [],
+            "inferenceMs": 0,
+            "processMs": process_time,
+            "moduleId": "ObjectDetectionYOLOv11",
+            "moduleName": "Object Detection (YOLOv11)",
+            "command": "detect",
+            "inferenceDevice": "CPU",
+            "analysisRoundTripMs": process_time,
+            "processedBy": hostname,
+            "timestampUTC": timestamp_utc
+        }), 500
 # ---------------------------------------------
+
+# --- API Endpoints ---
+@app.route('/api/select_closest_object', methods=['POST'])
+def select_closest_object():
+    """
+    Selects the object closest to the given (x, y) coordinates and sets the track ID filter.
+    """
+    data = request.get_json()
+    x = data.get('x')
+    y = data.get('y')
+
+    if x is None or y is None:
+        return jsonify({"error": "Missing x or y coordinates"}), 400
+
+    # The frontend sends normalized coordinates, but the backend expects pixel coordinates.
+    # We need the frame dimensions to convert them back.
+    # Let's get the last processed frame dimensions from the detection system.
+    frame_height, frame_width = detection_system.get_last_frame_dimensions()
+
+    if frame_width == 0 or frame_height == 0:
+        return jsonify({"error": "Backend not ready, frame dimensions unknown."}), 503
+
+    # Convert normalized coordinates to pixel coordinates
+    pixel_x = int(x * frame_width)
+    pixel_y = int(y * frame_height)
+
+    logger.info(f"Received click at normalized ({x:.2f}, {y:.2f}), pixel ({pixel_x}, {pixel_y})")
+
+    # Get the current detections (unfiltered)
+    all_detections = detection_system.get_current_detections()
+
+    closest_object = None
+    min_distance = float('inf')
+
+    for det in all_detections:
+        track_id = det.get('track_id')
+        box = det.get('box') # (x1, y1, x2, y2)
+        mask = det.get('mask') # Optional mask
+
+        if not track_id or not box:
+            continue
+
+        # Determine the center of the object
+        if mask is not None and len(mask) > 0:
+            # Calculate centroid of the mask
+            M = cv2.moments(np.array(mask, dtype=np.int32))
+            if M["m00"] > 0:
+                center_x = int(M["m10"] / M["m00"])
+                center_y = int(M["m01"] / M["m00"])
+            else:
+                # Fallback for zero-area contour
+                center_x = int((box[0] + box[2]) / 2)
+                center_y = int((box[1] + box[3]) / 2)
+        else:
+            # Use center of the bounding box
+            center_x = int((box[0] + box[2]) / 2)
+            center_y = int((box[1] + box[3]) / 2)
+
+        # Calculate Euclidean distance from click to object center
+        distance = np.sqrt((pixel_x - center_x)**2 + (pixel_y - center_y)**2)
+
+        if distance < min_distance:
+            min_distance = distance
+            closest_object = det
+
+    if closest_object:
+        selected_track_id = closest_object.get('track_id')
+        logger.info(f"Closest object found: track_id={selected_track_id} with distance {min_distance:.2f}")
+        # Set the system's track ID filter
+        detection_system.set_track_id_filter(selected_track_id)
+        return jsonify({
+            "success": True, 
+            "message": f"Track ID filter set to {selected_track_id}",
+            "selected_track_id": selected_track_id
+        })
+    else:
+        logger.info("No objects detected, cannot select closest.")
+        return jsonify({"error": "No objects found to select from"}), 404
+
+# DUPLICATE ROUTE DISABLED - The route at line 483 is the active one
+# This duplicate definition was never being called by Flask (first route wins)
+# Keeping it commented for reference in case the implementation is needed later
+"""
+@app.route('/api/current_detections')
+def get_current_detections():
+    \"\"\"Returns the current list of detected objects, optionally filtered.\"\"\"
+    try:
+        # Get query parameters for filtering
+        track_id_filter = request.args.get('track_id', type=int)
+        label_filter = request.args.getlist('label')
+
+        detections = detection_system.get_current_detections()
+
+        # Apply track ID filter if provided
+        if track_id_filter is not None:
+            detections = [d for d in detections if d.get('track_id') == track_id_filter]
+
+        # Apply label filter if provided
+        if label_filter:
+            detections = [d for d in detections if d.get('label') in label_filter]
+
+        # Serialize detections for JSON response
+        serialized_detections = []
+        for det in detections:
+            # Basic serialization
+            serialized_det = {
+                'track_id': det.get('track_id'),
+                'label': det.get('label'),
+                'confidence': det.get('confidence'),
+                'box': det.get('box'), # Assuming box is already a serializable format
+                # Add more fields as needed
+            }
+
+            # If you have complex types, convert them here
+            # For example, if 'box' is a numpy array, convert to list: 'box': det['box'].tolist()
+
+            serialized_detections.append(serialized_det)
+
+        return jsonify(serialized_detections), 200
+    except Exception as e:
+        logger.exception("API: Error getting current detections")
+        return jsonify({"error": "Failed to get current detections"}), 500
+"""
+# ------------------------------------
 
 # --- Graceful Shutdown --- 
 def cleanup_on_exit():
@@ -697,7 +1327,7 @@ if __name__ == '__main__':
         
         # Get host and port from environment variables or use defaults
         host = os.environ.get('FLASK_RUN_HOST', '0.0.0.0')
-        port = int(os.environ.get('FLASK_RUN_PORT', 5000))
+        port = int(os.environ.get('FLASK_RUN_PORT', 8082))
         
         app.run(host=host, port=port, debug=False, use_reloader=False) # use_reloader=False is important for threads
 
