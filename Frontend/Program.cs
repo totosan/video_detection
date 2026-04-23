@@ -44,8 +44,8 @@ public class Program
         bool useHuggingFace = args.Contains("-huggingface");
 
         // Configure these to your Ollama setup
-        var ollamaMode_text_lId = "gpt-oss:20b"; // Or your preferred model, e.g., "mistral", "phi3"
-        //var ollamaMode_text_lId = "llama3.2"; // Or your preferred model, e.g., "mistral", "phi3"
+        //var ollamaMode_text_lId = "gpt-oss:20b"; // Or your preferred model, e.g., "mistral", "phi3"
+        var ollamaMode_text_lId = "llama3.2"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaMode_vision_lId = "minicpm-v:8b"; // Changed from :latest to :8b (the actual installed version)
         //var ollamaMode_vision_lId = "llava-phi3:latest"; // Or your preferred model, e.g., "mistral", "phi3"
         var ollamaBaseUrl = new Uri("http://localhost:11434"); // Default Ollama API endpoint

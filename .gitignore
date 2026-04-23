@@ -5,3 +5,5 @@
 *.png
 *.gif
 *.pt
+.venv*/
+
